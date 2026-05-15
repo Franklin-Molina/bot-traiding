@@ -206,3 +206,6 @@ IP restringida
 ├── /models             # Entidades de base de datos (SQLAlchemy / Dataclasses)
 └── main.py             # Entrypoint, asyncio.gather() para arrancar WebSockets, Bot y Scheduler
 ```
+ python -m pytest tests/pro_suite
+ uv run  python .\test_binance_connection.py 
+

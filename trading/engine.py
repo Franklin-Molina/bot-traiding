@@ -4,7 +4,7 @@ from core.state import system_state, HealthStatus
 from infrastructure.binance_ws import BinanceWS
 from trading.executor import TradeExecutor
 from trading.recovery import RecoveryEngine
-from trading.indicators import PriceBuffer
+from trading.indicators import PriceBuffer, TA
 
 async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyncio.Queue, alert_queue: asyncio.Queue):
     """
@@ -16,7 +16,7 @@ async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyn
     
     # Trabajadores desacoplados
     tasks = [
-        asyncio.create_task(ws_client.connect(streams=["!miniTicker@arr"])),
+        asyncio.create_task(ws_client.connect()),
         asyncio.create_task(strategy_processor(market_queue, strategy_queue, alert_queue))
     ]
     

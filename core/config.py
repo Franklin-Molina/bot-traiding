@@ -14,10 +14,12 @@ class Settings(BaseSettings):
     MODELOS: str = "openai/gpt-4o,anthropic/claude-3-opus"
     
     # Trading Rules
-    MIN_TRADE_USD: float = 8.0
+    MIN_TRADE_USD: float = 10.0
     MIN_MOVEMENT_PERCENT: float = 5.0
-    MAX_ACTIVE_SLOTS: int = 10
-    RISK_PER_TRADE: float = 0.02
+    MAX_ACTIVE_SLOTS: int = 1
+    MAX_OPEN_POSITIONS: int = 1   # Alias para compatibilidad con main.py
+    USDT_PER_SLOT: float = 6.0   # Capital asignado a cada operación
+    RISK_PER_TRADE: float = 0.01  # 1% de riesgo inicial
     MIN_ATR_THRESHOLD: float = 0.0001
     MAX_PRICE_AGE_MS: int = 2000
     TRAILING_STOP_PERCENT: float = 0.015 # 1.5% de trail
