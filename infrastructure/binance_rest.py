@@ -87,22 +87,67 @@ class BinanceRest(ExchangeInterface):
             logger.error(f"Error en compra ({symbol}): {e}")
             return None
 
-    async def execute_market_sell(self, symbol: str, quantity: float, client_order_id: str = None):
-        """Ejecuta venta a mercado con idempotencia."""
+    async def execute_market_sell(self, symbol: str, quantity: float = None, client_order_id: str = None):
+        """Venta a mercado segura (usa balance real y ajusta stepSize)."""
         loop = asyncio.get_event_loop()
+
         try:
+            # 1. Obtener asset (ej: OSMO de OSMOUSDT)
+            base_asset = symbol.replace("USDT", "")
+
+            # 2. Obtener balance REAL
+            balance = await self.get_balance(base_asset)
+
+            if balance <= 0:
+                logger.warning(f"No hay balance para vender {base_asset}")
+                return None
+
+            # 3. Obtener info del símbolo (para stepSize)
+            symbol_info = await self.get_symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"No se pudo obtener info del símbolo {symbol}")
+                return None
+
+            step_size = None
+            min_qty = None
+
+            for f in symbol_info['filters']:
+                if f['filterType'] == 'LOT_SIZE':
+                    step_size = float(f['stepSize'])
+                    min_qty = float(f['minQty'])
+
+            if step_size is None or min_qty is None:
+                logger.error(f"No se encontró LOT_SIZE para {symbol}")
+                return None
+
+            # 4. Ajustar cantidad
+            def adjust_qty(qty, step):
+                import math
+                return math.floor(qty / step) * step
+
+            qty_to_sell = balance if quantity is None else min(quantity, balance)
+            qty_to_sell = adjust_qty(qty_to_sell, step_size)
+
+            if qty_to_sell < min_qty:
+                logger.warning(f"Cantidad menor al mínimo permitido: {qty_to_sell} < {min_qty}")
+                return None
+
+            # 5. Crear orden
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
                 'type': 'MARKET',
-                'quantity': quantity
+                'quantity': float(f"{qty_to_sell:.8f}")
             }
+
             if client_order_id:
                 params['newClientOrderId'] = client_order_id
-                
+
             order = await loop.run_in_executor(None, lambda: self.client.new_order(**params))
-            logger.success(f"Venta ejecutada (ID: {client_order_id}): {order}")
+
+            logger.success(f"Venta ejecutada REAL ({symbol}): {qty_to_sell}")
             return order
+
         except Exception as e:
             logger.error(f"Error en venta ({symbol}): {e}")
             return None
@@ -121,5 +166,10 @@ class BinanceRest(ExchangeInterface):
                 
             return await loop.run_in_executor(None, lambda: self.client.get_order(**params))
         except Exception as e:
-            logger.error(f"Error consultando orden {client_order_id or exchange_order_id}: {e}")
+            # Si el error es -2013 (Order does not exist), lo manejamos más silenciosamente
+            # ya que es esperado durante la reconciliación de órdenes que fallaron antes de enviarse.
+            if "Order does not exist" in str(e) or "-2013" in str(e):
+                logger.debug(f"Orden no encontrada en Binance: {client_order_id or exchange_order_id}")
+            else:
+                logger.error(f"Error consultando orden {client_order_id or exchange_order_id}: {e}")
             return None

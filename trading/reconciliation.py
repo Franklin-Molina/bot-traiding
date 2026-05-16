@@ -111,10 +111,19 @@ class ReconciliationEngine:
                         )
 
                         if not remote_order:
-                            logger.warning(
-                                f"Orden no encontrada: "
-                                f"{order.client_order_id}"
+                            # Si la orden no se encuentra en el exchange después de un SUBMITTED,
+                            # probablemente falló pre-vuelo (filtros, balance).
+                            # Marcamos como REJECTED para limpiar la DB.
+                            logger.warning(f"Orden no encontrada en Binance, marcando como REJECTED: {order.client_order_id}")
+                            await session.execute(
+                                update(Order)
+                                .where(Order.id == order.id)
+                                .values(
+                                    status=OrderStatus.REJECTED,
+                                    updated_at=datetime.now(UTC)
+                                )
                             )
+                            await session.flush()
                             continue
 
                         remote_status = remote_order.get("status")

@@ -35,7 +35,12 @@ async def start_bot(alert_queue: asyncio.Queue):
         # Iniciar polling
         await dp.start_polling(bot)
     finally:
+        # Dar un pequeño margen para procesar alertas finales
+        if not alert_queue.empty():
+            await asyncio.sleep(1)
         alert_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await alert_task
         await bot.session.close()
 
 async def alert_dispatcher(bot: Bot, alert_queue: asyncio.Queue):

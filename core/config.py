@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     # Trading Rules
     MIN_TRADE_USD: float = 10.0
     MIN_MOVEMENT_PERCENT: float = 5.0
-    MAX_ACTIVE_SLOTS: int = 1
-    MAX_OPEN_POSITIONS: int = 1   # Alias para compatibilidad con main.py
+    MAX_ACTIVE_SLOTS: int = 5
+    MAX_OPEN_POSITIONS: int = 5   # Alias para compatibilidad con main.py
     USDT_PER_SLOT: float = 6.0   # Capital asignado a cada operación
     RISK_PER_TRADE: float = 0.01  # 1% de riesgo inicial
     MIN_ATR_THRESHOLD: float = 0.0001

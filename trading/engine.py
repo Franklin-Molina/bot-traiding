@@ -73,16 +73,32 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
             
             for tick in market_data_batch:
                 symbol = tick['s']
+                
+                # 1. Filtro rápido de mercados (Solo USDT y excluir "basura")
+                if not symbol.endswith("USDT") or any(bad in symbol for bad in ["TRY", "EUR", "IDR", "GBP", "DAI", "RUB"]):
+                    continue
+
                 current_price = float(tick['c'])
                 
-                # Inicializar buffer y recuperación si es nuevo
-                if symbol not in price_buffers:
-                    price_buffers[symbol] = PriceBuffer(maxlen=100)
-                    # Recuperación asíncrona para no bloquear el loop
-                    task = asyncio.create_task(recovery.recover_symbol(symbol, price_buffers[symbol]))
-                    system_state.task_registry.register(task, f"Recovery_{symbol}")
+                # 2. Inicializar buffer y recuperación SOLO si es relevante (Posición activa, Orden pendiente o Candidato)
+                is_relevant = (
+                    symbol in active_candidates or 
+                    symbol in executor.active_positions or 
+                    symbol in executor.pending_orders
+                )
 
-                price_buffers[symbol].add(current_price)
+                if is_relevant:
+                    if symbol not in price_buffers:
+                        price_buffers[symbol] = PriceBuffer(maxlen=100)
+                        # Recuperación asíncrona para no bloquear el loop
+                        task = asyncio.create_task(recovery.recover_symbol(symbol, price_buffers[symbol]))
+                        system_state.task_registry.register(task, f"Recovery_{symbol}")
+
+                    price_buffers[symbol].add(current_price)
+                elif symbol in price_buffers:
+                    # Si ya no es relevante pero tiene buffer, podemos decidir si mantenerlo un poco o borrarlo
+                    # Por ahora lo mantenemos para evitar recrearlo si vuelve a ser candidato pronto
+                    price_buffers[symbol].add(current_price)
 
                 # A. Monitorear salidas de posiciones abiertas
                 await executor.monitor_and_exit(symbol, current_price)

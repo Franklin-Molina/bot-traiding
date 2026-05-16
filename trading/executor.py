@@ -82,10 +82,17 @@ class TradeExecutor:
             return
 
         # Validación Portfolio-Level Risk (Capacidad de slots)
+        used_slots = await SlotManager.get_used_slots()
+        total_slots = await SlotManager.get_total_slots()
+        logger.info(f"Slots activos: {used_slots} / {total_slots}")
+        logger.info(f"Active positions: {list(self.active_positions.keys())}")
+        
         slot = await SlotManager.get_available_slot()
         if not slot:
             logger.warning(f"Portfolio Risk: Sin slots disponibles para {symbol}")
             return
+
+        logger.info(f"Intentando BUY {symbol} | Active: {len(self.active_positions)}")
 
         self.pending_orders.add(symbol)
         client_order_id = self._generate_client_id("buy")
@@ -220,11 +227,19 @@ class TradeExecutor:
 
     async def execute_exit(self, pos: Position, expected_price: float, reason: str):
         symbol = pos.symbol
+
+        # 🔴 evitar múltiples ejecuciones
+        if getattr(pos, "closing", False):
+            return
+        pos.closing = True
+
+        # 🔴 sacar de posiciones activas inmediatamente
+        self.active_positions.pop(symbol, None)
+
         client_order_id = self._generate_client_id("sell")
         start_perf = time.perf_counter()
-        
+
         try:
-            # Registrar orden de venta
             async with async_session() as session:
                 db_order = Order(
                     client_order_id=client_order_id,
@@ -237,35 +252,62 @@ class TradeExecutor:
                 session.add(db_order)
                 await session.commit()
 
-            order_resp = await asyncio.wait_for(
-                self.exchange.execute_market_sell(symbol, pos.quantity, client_order_id=client_order_id),
-                timeout=10
-            )
+            # 🔴 vender TODO usando balance real
+            try:
+                order_resp = await asyncio.wait_for(
+                    self.exchange.execute_market_sell(symbol, None, client_order_id=client_order_id),
+                    timeout=10
+                )
 
-            if order_resp:
-                fill_price = float(order_resp.get('price', expected_price))
-                if 'cummulativeQuoteQty' in order_resp and float(order_resp['executedQty']) > 0:
-                    fill_price = float(order_resp['cummulativeQuoteQty']) / float(order_resp['executedQty'])
-                
-                slippage = ((fill_price / expected_price) - 1) * 100 if expected_price > 0 else 0
-                latency = (time.perf_counter() - start_perf) * 1000
-                
-                await self.close_position_complete(pos, fill_price, reason, slippage, latency, expected_price)
-                
-                async with async_session() as session:
-                    from sqlalchemy import update
-                    await session.execute(update(Order).where(Order.client_order_id == client_order_id).values(
-                        status=OrderStatus.FILLED,
-                        fill_price=fill_price,
-                        executed_quantity=float(order_resp.get('executedQty', pos.quantity)),
-                        exchange_order_id=str(order_resp.get('orderId'))
-                    ))
-                    await session.commit()
-            else:
-                logger.error(f"Fallo en ejecución de venta para {symbol}")
+                if order_resp:
+                    fill_price = float(order_resp.get('price', expected_price))
+                    if 'cummulativeQuoteQty' in order_resp and float(order_resp['executedQty']) > 0:
+                        fill_price = float(order_resp['cummulativeQuoteQty']) / float(order_resp['executedQty'])
+                    
+                    slippage = ((fill_price / expected_price) - 1) * 100 if expected_price > 0 else 0
+                    latency = (time.perf_counter() - start_perf) * 1000
+                    
+                    await self.close_position_complete(pos, fill_price, reason, slippage, latency, expected_price)
+                    
+                    async with async_session() as session:
+                        from sqlalchemy import update
+                        await session.execute(update(Order).where(Order.client_order_id == client_order_id).values(
+                            status=OrderStatus.FILLED,
+                            fill_price=fill_price,
+                            executed_quantity=float(order_resp.get('executedQty', pos.quantity)),
+                            exchange_order_id=str(order_resp.get('orderId'))
+                        ))
+                        await session.commit()
+                else:
+                    logger.error(f"Fallo en ejecución de venta para {symbol} (posible balance insuficiente o error de filtros)")
+                    async with async_session() as session:
+                        from sqlalchemy import update
+                        await session.execute(update(Order).where(Order.client_order_id == client_order_id).values(
+                            status=OrderStatus.REJECTED
+                        ))
+                        await session.commit()
+                    # Si falló la venta, debemos restaurar el estado para que el bot lo reintente o marque error
+                    pos.closing = False 
+                    self.active_positions[symbol] = pos
 
-        except Exception as e:
-            logger.error(f"Error en execute_exit para {symbol}: {e}")
+            except Exception as e:
+                logger.error(f"Error en execute_exit para {symbol}: {e}")
+                # En caso de excepción, intentamos marcar la orden como fallida
+                try:
+                    async with async_session() as session:
+                        from sqlalchemy import update
+                        await session.execute(update(Order).where(Order.client_order_id == client_order_id).values(
+                            status=OrderStatus.REJECTED
+                        ))
+                        await session.commit()
+                except:
+                    pass
+                pos.closing = False
+                self.active_positions[symbol] = pos
+        except Exception as outer_e:
+            logger.error(f"Error crítico en estructura de execute_exit para {symbol}: {outer_e}")
+            pos.closing = False
+            self.active_positions[symbol] = pos
 
     async def close_position_complete(self, pos: Position, sell_price: float, reason: str, slippage: float, latency: float, expected_sell: float):
         pnl_pct = (sell_price / pos.buy_price - 1) * 100

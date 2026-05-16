@@ -16,13 +16,28 @@ from trading.slots import SlotManager
 
 shutdown_event = asyncio.Event()
 
-async def shutdown():
-    logger.warning("Apagando sistema...")
-    shutdown_event.set()
-    await event_logger.stop()
-
 async def main():
     logger.info("🚀 Iniciando Arquitectura Maestro V2.0 PRO")
+
+    alert_queue = asyncio.Queue(maxsize=100)
+
+    # Redefinir shutdown para que tenga acceso a alert_queue
+    async def graceful_shutdown():
+        logger.warning("Apagando sistema...")
+        shutdown_event.set()
+        try:
+            await alert_queue.put("⚠️ **Bot Inactivo**")
+            # Dar un margen para que Telegram envíe el mensaje
+            await asyncio.sleep(2)
+        except:
+            pass
+        await event_logger.stop()
+
+    # Actualizar handler de señales si es posible
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with suppress(NotImplementedError):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(graceful_shutdown()))
 
     # 1. Inicializar infraestructura y WAL
     await init_db()
@@ -39,7 +54,6 @@ async def main():
     # 3. Colas desacopladas
     market_queue = asyncio.Queue(maxsize=1000)
     strategy_queue = asyncio.Queue(maxsize=50)
-    alert_queue = asyncio.Queue(maxsize=100)
 
     # 4. Exchange Interface para Reconciliación
     exchange = PaperExchange() if settings.SIMULATION_MODE else BinanceRest()
@@ -75,10 +89,17 @@ async def main():
         logger.warning("Main cancelado")
     finally:
         logger.warning("🛑 Cerrando tareas...")
+        # Asegurar que enviamos notificación si no se hizo por señal
+        if not shutdown_event.is_set():
+            with suppress(Exception):
+                alert_queue.put_nowait("⚠️ **Bot Inactivo**")
+            
         for t in tasks: t.cancel()
-        for t in tasks:
-            with suppress(asyncio.CancelledError):
-                await t
+        
+        # Esperar a que las tareas terminen su cancelación
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
         await event_logger.stop()
         logger.info("✅ Sistema PRO apagado correctamente")
 
@@ -86,11 +107,22 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with suppress(NotImplementedError):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
-
     try:
         loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
     finally:
-        loop.close()
+        try:
+            # Cancelar tareas pendientes en el loop para evitar "Task was destroyed but it is pending"
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except:
+            pass
+        finally:
+            loop.close()
