@@ -39,6 +39,8 @@ class SystemState:
         self._panic_mode = False
         self._health = HealthStatus.HEALTHY
         self.task_registry = TaskRegistry()
+        self.daily_pnl = 0.0
+        self.max_daily_loss_pct = -5.0
 
     @property
     def is_running(self):

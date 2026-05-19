@@ -87,6 +87,53 @@ class BinanceRest(ExchangeInterface):
             logger.error(f"Error en compra ({symbol}): {e}")
             return None
 
+    async def execute_limit_ioc_sell(self, symbol: str, price: float, quantity: float = None, client_order_id: str = None):
+        """Venta LIMIT IOC (Immediate or Cancel) para evitar barrer el libro."""
+        loop = asyncio.get_event_loop()
+        try:
+            base_asset = symbol.replace("USDT", "")
+            balance = await self.get_balance(base_asset)
+            if balance <= 0: return {"status": "INSUFFICIENT_BALANCE", "qty": 0}
+
+            symbol_info = await self.get_symbol_info(symbol)
+            if not symbol_info: return None
+
+            step_size = None
+            min_qty = None
+            for f in symbol_info['filters']:
+                if f['filterType'] == 'LOT_SIZE':
+                    step_size = float(f['stepSize'])
+                    min_qty = float(f['minQty'])
+
+            def adjust_qty(qty, step):
+                import math
+                return math.floor(qty / step) * step
+
+            qty_to_sell = balance if quantity is None else min(quantity, balance)
+            qty_to_sell = adjust_qty(qty_to_sell, step_size)
+
+            if qty_to_sell < min_qty:
+                return {"status": "INSUFFICIENT_BALANCE", "qty": qty_to_sell}
+
+            params = {
+                'symbol': symbol,
+                'side': 'SELL',
+                'type': 'LIMIT',
+                'timeInForce': 'IOC', # Immediate or Cancel
+                'quantity': float(f"{qty_to_sell:.8f}"),
+                'price': float(f"{price:.8f}")
+            }
+
+            if client_order_id:
+                params['newClientOrderId'] = client_order_id
+
+            order = await loop.run_in_executor(None, lambda: self.client.new_order(**params))
+            logger.success(f"Venta LIMIT IOC ejecutada ({symbol}): {qty_to_sell} @ {price}")
+            return order
+        except Exception as e:
+            logger.error(f"Error en venta LIMIT IOC ({symbol}): {e}")
+            return None
+
     async def execute_market_sell(self, symbol: str, quantity: float = None, client_order_id: str = None):
         """Venta a mercado segura (usa balance real y ajusta stepSize)."""
         loop = asyncio.get_event_loop()
@@ -100,7 +147,7 @@ class BinanceRest(ExchangeInterface):
 
             if balance <= 0:
                 logger.warning(f"No hay balance para vender {base_asset}")
-                return None
+                return {"status": "INSUFFICIENT_BALANCE", "qty": 0}
 
             # 3. Obtener info del símbolo (para stepSize)
             symbol_info = await self.get_symbol_info(symbol)
@@ -130,7 +177,7 @@ class BinanceRest(ExchangeInterface):
 
             if qty_to_sell < min_qty:
                 logger.warning(f"Cantidad menor al mínimo permitido: {qty_to_sell} < {min_qty}")
-                return None
+                return {"status": "INSUFFICIENT_BALANCE", "qty": qty_to_sell}
 
             # 5. Crear orden
             params = {

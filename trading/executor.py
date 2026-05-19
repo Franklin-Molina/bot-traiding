@@ -27,22 +27,42 @@ class TradeExecutor:
             
         self.active_positions = {} # symbol: Position
         self.pending_orders = set() # symbol
+        self.cooldowns = {} # symbol: end_timestamp
         self.failure_counter = 0 
         self.max_failures = 3
 
     async def load_active_positions(self):
-        """Carga posiciones abiertas de DB (Persistence Replay)."""
+        """Carga posiciones abiertas de DB y valida balance REAL en Binance (Reconciliación Total)."""
         async with async_session() as session:
-            from sqlalchemy import select
+            from sqlalchemy import select, delete
             query = select(Position).where(Position.status == "OPEN")
             result = await session.execute(query)
-            positions = result.scalars().all()
-            for pos in positions:
-                if not pos.highest_price:
-                    pos.highest_price = pos.buy_price
-                self.active_positions[pos.symbol] = pos
-            if positions:
-                logger.info(f"🔄 Persistence Replay: {len(positions)} posiciones activas recuperadas.")
+            db_positions = result.scalars().all()
+            
+            # 1. Limpiar posiciones de DB que no tienen balance en Binance
+            for pos in db_positions:
+                base_asset = pos.symbol.replace("USDT", "")
+                try:
+                    balance = await self.exchange.get_balance(base_asset)
+                    # Si el balance es despreciable (ej. < 0.1 USDT en valor), lo consideramos 0
+                    # Para simplificar, usamos > 0 si el asset existe
+                    if balance <= 0:
+                        logger.warning(f"👻 Reconciliación: Posición fantasma detectada: {pos.symbol}. Limpiando.")
+                        await SlotManager.release_slot(pos.slot_id)
+                        await session.execute(delete(Position).where(Position.id == pos.id))
+                        continue
+                    
+                    if not pos.highest_price:
+                        pos.highest_price = pos.buy_price
+                    self.active_positions[pos.symbol] = pos
+                except Exception as e:
+                    logger.error(f"Error validando balance para {pos.symbol} al inicio: {e}")
+                    # En caso de error de red, mantenemos la posición por seguridad
+                    self.active_positions[pos.symbol] = pos
+            
+            await session.commit()
+            if self.active_positions:
+                logger.info(f"🔄 Persistence Replay: {len(self.active_positions)} posiciones reales sincronizadas.")
 
     def _calculate_quantity(self, capital: float, price: float, symbol_info: dict) -> Decimal:
         d_capital = Decimal(str(capital))
@@ -72,8 +92,25 @@ class TradeExecutor:
         """Intenta abrir posición con Order State Machine y Idempotencia."""
         start_perf = time.perf_counter()
         
-        if price <= 0 or (atr is not None and atr < settings.MIN_ATR_THRESHOLD):
+        # 🔴 BLOQUEO DE SEGURIDAD: No operar sin ATR o con ATR inválido
+        if atr is None or price <= 0:
+            logger.warning(f"Compra abortada para {symbol}: ATR o precio inválido")
             return
+
+        # 1. ATR RELATIVO (En lugar de absoluto)
+        atr_rel = atr / price
+        if atr_rel < settings.MIN_ATR_RELATIVE:
+            logger.warning(f"Compra abortada para {symbol}: Volatilidad insuficiente ({atr_rel:.2%})")
+            return
+
+        # 🕒 VERIFICACIÓN DE COOLDOWN
+        now = time.time()
+        if symbol in self.cooldowns:
+            if now < self.cooldowns[symbol]:
+                # Logger silencioso para cooldown
+                return
+            else:
+                del self.cooldowns[symbol]
 
         if system_state.health not in [HealthStatus.HEALTHY, HealthStatus.RECOVERING]:
             return
@@ -119,10 +156,17 @@ class TradeExecutor:
                 await session.commit()
                 await event_logger.log_event("ORDER_SUBMITTED", symbol, {"cid": client_order_id, "price": price})
 
-            # Risk parameters
-            sl_dist = (atr * 1.5) if atr else (price * settings.RISK_PER_TRADE)
+            # Risk parameters: Usar ATR para SL/TP dinámico
+            # Según recomendación: SL = entry - (atr * 2.5), TP = entry + (atr * 4)
+            sl_dist = atr * 2.5 
+            
+            # Asegurar un SL mínimo del 0.5% y máximo del 5% para evitar locuras
+            min_sl_dist = price * 0.005
+            max_sl_dist = price * 0.05
+            sl_dist = max(min(sl_dist, max_sl_dist), min_sl_dist)
+
             stop_loss = price - sl_dist
-            take_profit = price + (sl_dist * 2)
+            take_profit = price + (atr * 4.0) # RR mejorado basado en ATR
 
             await SlotManager.lock_slot(slot.id)
 
@@ -140,6 +184,12 @@ class TradeExecutor:
                 
                 slippage = ((fill_price / price) - 1) * 100
                 latency = (time.perf_counter() - start_perf) * 1000
+
+                # 🛡️ PROTECCIÓN DE SLIPPAGE (Máximo MAX_SLIPPAGE_PERCENT)
+                if slippage > (settings.MAX_SLIPPAGE_PERCENT * 100):
+                    logger.warning(f"⚠️ ALTO SLIPPAGE DETECTADO: {symbol} @ {slippage:.2f}%")
+                    # Podríamos decidir salir inmediatamente, pero por ahora solo alertamos
+                    # y dejamos que el sistema gestione la posición
 
                 async with async_session() as session:
                     # Actualizar Orden
@@ -191,19 +241,28 @@ class TradeExecutor:
         if self.failure_counter >= self.max_failures:
             system_state.set_health(HealthStatus.DEGRADED)
 
-    async def monitor_and_exit(self, symbol: str, current_price: float):
+    async def monitor_and_exit(self, symbol: str, current_price: float, atr: float = None):
         if symbol not in self.active_positions: return
         pos = self.active_positions[symbol]
+        
+        # 🕒 TIEMPO MÍNIMO DE PERMANENCIA (30 segundos)
+        # Solo aplicable a salidas automáticas (SL/TP), no a pánico
+        from datetime import datetime, UTC
+        seconds_in_trade = (datetime.now(UTC) - pos.opened_at).total_seconds()
         
         # Asegurar inicialización de highest_price
         if pos.highest_price is None:
             pos.highest_price = pos.buy_price
 
-        # 1. Trailing Stop con Hysteresis
-        # Solo actualizamos si el precio subió significativamente (ej. > 0.2% desde la última actualización de SL)
+        # 1. Trailing Stop con ATR Dinámico
         if current_price > pos.highest_price:
             pos.highest_price = current_price
-            new_sl = current_price * (1 - settings.TRAILING_STOP_PERCENT)
+            
+            # Si tenemos ATR, usamos ATR * 1.5, si no, usamos el porcentaje por defecto
+            if atr:
+                new_sl = current_price - (atr * 1.5)
+            else:
+                new_sl = current_price * (1 - settings.TRAILING_STOP_PERCENT)
             
             # Umbral de Hysteresis: Evitar spam de DB si el cambio es ínfimo
             change_pct = (current_price / (pos.last_sl_update_price or pos.buy_price) - 1) * 100
@@ -223,6 +282,16 @@ class TradeExecutor:
             exit_reason = "TAKE_PROFIT"
 
         if exit_reason:
+            # ⛔ Bloquear salida si no han pasado 30 segundos
+            if seconds_in_trade < 30:
+                # Logueamos pero no salimos (a menos que sea una caída catastrófica > 10% del SL)
+                if current_price > pos.stop_loss * 0.9: 
+                    logger.debug(f"Ignorando salida prematura para {symbol} ({seconds_in_trade:.1f}s en trade)")
+                    return
+                else:
+                    exit_reason += "_CRITICAL"
+
+            logger.info(f"🚀 SELL TRIGGER ({exit_reason}) -> Symbol: {symbol} | Price: {current_price} | SL: {pos.stop_loss:.6f} | TP: {pos.take_profit:.6f} | Time: {seconds_in_trade:.1f}s")
             await self.execute_exit(pos, current_price, exit_reason)
 
     async def execute_exit(self, pos: Position, expected_price: float, reason: str):
@@ -232,6 +301,24 @@ class TradeExecutor:
         if getattr(pos, "closing", False):
             return
         pos.closing = True
+
+        # 🔴 VALIDACIÓN DE BALANCE REAL ANTES DE VENDER
+        base_asset = symbol.replace("USDT", "")
+        try:
+            real_balance = await self.exchange.get_balance(base_asset)
+            if real_balance <= 0:
+                logger.warning(f"👻 Posición fantasma detectada antes de vender: {symbol}. Limpiando internamente.")
+                self.active_positions.pop(symbol, None)
+                await SlotManager.release_slot(pos.slot_id)
+                # También limpiar de la DB por si acaso
+                async with async_session() as session:
+                    from sqlalchemy import delete
+                    await session.execute(delete(Position).where(Position.id == pos.id))
+                    await session.commit()
+                return
+        except Exception as e:
+            logger.error(f"Error verificando balance real para {symbol} antes de vender: {e}")
+            # Continuamos con el intento de venta por si el error fue de red
 
         # 🔴 sacar de posiciones activas inmediatamente
         self.active_positions.pop(symbol, None)
@@ -252,12 +339,26 @@ class TradeExecutor:
                 session.add(db_order)
                 await session.commit()
 
-            # 🔴 vender TODO usando balance real
+            # 🔴 vender TODO usando balance real con LIMIT IOC
             try:
+                # Intentamos vender al precio esperado para evitar barrer el libro
                 order_resp = await asyncio.wait_for(
-                    self.exchange.execute_market_sell(symbol, None, client_order_id=client_order_id),
+                    self.exchange.execute_limit_ioc_sell(symbol, expected_price, None, client_order_id=client_order_id),
                     timeout=10
                 )
+
+                # Si falla o no se llena totalmente (IOC), podríamos reintentar con MARKET como fallback de emergencia
+                if not order_resp:
+                    logger.warning(f"LIMIT IOC falló para {symbol}. Reintentando con MARKET por seguridad.")
+                    order_resp = await asyncio.wait_for(
+                        self.exchange.execute_market_sell(symbol, None, client_order_id=client_order_id),
+                        timeout=10
+                    )
+
+                if order_resp and order_resp.get("status") == "INSUFFICIENT_BALANCE":
+                    logger.warning(f"👻 Limpieza de POSICIÓN FANTASMA detectada para {symbol}. Cerrando en DB sin venta.")
+                    await self.close_position_complete(pos, expected_price, "GHOST_CLEANUP", 0, 0, expected_price)
+                    return
 
                 if order_resp:
                     fill_price = float(order_resp.get('price', expected_price))
@@ -312,6 +413,17 @@ class TradeExecutor:
     async def close_position_complete(self, pos: Position, sell_price: float, reason: str, slippage: float, latency: float, expected_sell: float):
         pnl_pct = (sell_price / pos.buy_price - 1) * 100
         
+        # 🛡️ Circuit Breaker: Actualizar PnL Diario
+        system_state.daily_pnl += pnl_pct
+        if system_state.daily_pnl <= system_state.max_daily_loss_pct:
+            logger.critical(f"🛑 CIRCUIT BREAKER ACTIVADO: Pérdida diaria de {system_state.daily_pnl:.2f}% excede límite.")
+            system_state.set_paused(True)
+            self._send_alert(f"🛑 CIRCUIT BREAKER: Sistema pausado por pérdida diaria de {system_state.daily_pnl:.2f}%")
+
+        # Aplicar Cooldown de 15 minutos (900s) al cerrar posición
+        self.cooldowns[pos.symbol] = time.time() + 900
+        logger.info(f"Cooldown de 15min activado para {pos.symbol}")
+
         async with async_session() as session:
             history = TradeHistory(
                 symbol=pos.symbol,

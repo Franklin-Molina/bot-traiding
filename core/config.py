@@ -20,9 +20,12 @@ class Settings(BaseSettings):
     MAX_OPEN_POSITIONS: int = 5   # Alias para compatibilidad con main.py
     USDT_PER_SLOT: float = 6.0   # Capital asignado a cada operación
     RISK_PER_TRADE: float = 0.01  # 1% de riesgo inicial
-    MIN_ATR_THRESHOLD: float = 0.0001
+    MIN_ATR_RELATIVE: float = 0.003 # 0.3% de volatilidad mínima
+    MAX_SPREAD_PERCENT: float = 0.0015 # 0.15% de spread máximo
+    MAX_SLIPPAGE_PERCENT: float = 0.005 # 0.5% de slippage máximo
     MAX_PRICE_AGE_MS: int = 2000
-    TRAILING_STOP_PERCENT: float = 0.015 # 1.5% de trail
+    TRAILING_STOP_ATR_MULT: float = 1.5 # Multiplicador ATR para Trailing Stop
+    TRAILING_STOP_PERCENT: float = 0.015 # Fallback de 1.5% de trail
     
     # Database
     DB_DSN: str = "postgresql://user:pass@localhost:5432/trading_db"

@@ -9,10 +9,12 @@ from core.state import system_state, HealthStatus
 
 class BinanceWS:
     def __init__(self, market_queue: asyncio.Queue, streams: list = None):
-        self.base_url = "wss://stream.binance.com:9443/ws"
+        # Usamos /stream para multiplexing
+        self.base_url = "wss://stream.binance.com:9443/stream"
         self.market_queue = market_queue
-        self.streams = streams or ["!miniTicker@arr"]
+        self.streams = set(streams or ["!miniTicker@arr"])
         self.is_running = False
+        self._ws = None
         self._last_msg_time = 0
         self._reconnect_delay = 1
         self._max_reconnect_delay = 3
@@ -40,10 +42,11 @@ class BinanceWS:
 
         while self.is_running:
             try:
-                stream_url = f"{self.base_url}/{'/'.join(self.streams)}"
-                logger.info(f"Conectando a Binance WebSocket: {stream_url}")
+                stream_url = f"{self.base_url}?streams={'/'.join(self.streams)}"
+                logger.info(f"Conectando a Binance WebSocket (Multiplex): {stream_url}")
                 
                 async with websockets.connect(stream_url) as ws:
+                    self._ws = ws
                     system_state.set_health(HealthStatus.HEALTHY)
                     self._reconnect_delay = 1 # Reset delay on success
                     logger.success("Conexión WebSocket establecida.")
@@ -68,8 +71,47 @@ class BinanceWS:
                 await asyncio.sleep(sleep_time)
                 self._reconnect_delay *= 1.5
 
+    async def subscribe(self, streams: list):
+        """Suscribe dinámicamente a nuevos streams."""
+        new_streams = [s for s in streams if s not in self.streams]
+        if not new_streams: return
+        
+        self.streams.update(new_streams)
+        if self._ws and self._ws.open:
+            payload = {
+                "method": "SUBSCRIBE",
+                "params": new_streams,
+                "id": random.randint(1, 10000)
+            }
+            await self._ws.send(json.dumps(payload))
+            logger.info(f"WS SUBSCRIBE: {new_streams}")
+
+    async def unsubscribe(self, streams: list):
+        """Desuscribe dinámicamente de streams."""
+        to_remove = [s for s in streams if s in self.streams]
+        if not to_remove: return
+        
+        for s in to_remove:
+            self.streams.discard(s)
+            
+        if self._ws and self._ws.open:
+            payload = {
+                "method": "UNSUBSCRIBE",
+                "params": to_remove,
+                "id": random.randint(1, 10000)
+            }
+            await self._ws.send(json.dumps(payload))
+            logger.info(f"WS UNSUBSCRIBE: {to_remove}")
+
     async def _process_message(self, message):
-        data = json.loads(message)
+        raw_data = json.loads(message)
+        
+        # En multiplex, la data viene en 'data' y el stream en 'stream'
+        if 'stream' in raw_data and 'data' in raw_data:
+            data = raw_data['data']
+        else:
+            data = raw_data
+
         now = time.time() * 1000 # ms
         
         # Extraer event time de Binance (E) si existe

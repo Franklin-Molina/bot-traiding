@@ -30,12 +30,14 @@ class MacroEngine:
                 candidates = []
                 for t in tickers:
                     symbol = t['symbol']
-                    # Filtros: Solo USDT, movimiento >= MIN_PERCENT, volumen > 1M (ejemplo)
-                    if symbol.endswith("USDT"):
+                    # Filtros: Solo USDT, movimiento >= MIN_PERCENT, volumen > 2M (Subimos exigencia)
+                    # Excluimos símbolos con nombres sospechosos (tokens apalancados, etc)
+                    if symbol.endswith("USDT") and not any(x in symbol for x in ["UP", "DOWN", "BEAR", "BULL"]):
                         change = float(t['priceChangePercent'])
                         volume = float(t['quoteVolume'])
                         
-                        if change >= settings.MIN_MOVEMENT_PERCENT and volume > 1_000_000:
+                        # Filtro de Liquidez: Mínimo 2M USDT de volumen en 24h
+                        if change >= settings.MIN_MOVEMENT_PERCENT and volume > 2_000_000:
                             candidates.append({
                                 "symbol": symbol,
                                 "change": change,
@@ -44,8 +46,9 @@ class MacroEngine:
                 
                 logger.info(f"Filtro técnico inicial: {len(candidates)} activos encontrados.")
 
-                # 3. Consultar IA para los mejores candidatos (Top 5 por movimiento)
-                candidates = sorted(candidates, key=lambda x: x['change'], reverse=True)[:5]
+                # 3. Consultar IA para los mejores candidatos (Top 5 por combinación de volumen y cambio)
+                # Priorizamos activos que tienen volumen Y movimiento
+                candidates = sorted(candidates, key=lambda x: x['change'] * x['volume'], reverse=True)[:5]
 
                 for c in candidates:
                     score = await self.ai.analyze_asset(c['symbol'], context=c)
