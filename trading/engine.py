@@ -1,5 +1,7 @@
 import asyncio
+import time
 from loguru import logger
+from core.config import settings
 from core.state import system_state, HealthStatus
 from infrastructure.binance_ws import BinanceWS
 from trading.executor import TradeExecutor
@@ -17,7 +19,7 @@ async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyn
     # Trabajadores desacoplados
     tasks = [
         asyncio.create_task(ws_client.connect()),
-        asyncio.create_task(strategy_processor(market_queue, strategy_queue, alert_queue))
+        asyncio.create_task(strategy_processor(market_queue, strategy_queue, alert_queue, ws_client))
     ]
     
     try:
@@ -29,7 +31,7 @@ async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyn
         for t in tasks:
             t.cancel()
 
-async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asyncio.Queue, alert_queue: asyncio.Queue):
+async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asyncio.Queue, alert_queue: asyncio.Queue, ws_client: BinanceWS):
     """
     Procesador de estrategias en tiempo real (Motor 2).
     Mantiene la lista de candidatos activos y monitorea sus ticks.

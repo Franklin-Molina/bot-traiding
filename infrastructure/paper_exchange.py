@@ -43,6 +43,29 @@ class PaperExchange(ExchangeInterface):
         logger.info(f"[PAPER] Compra ejecutada: {symbol} Qty: {quantity}")
         return order
 
+    async def execute_limit_ioc_sell(self, symbol: str, price: float, quantity: float = None, client_order_id: str = None):
+        self.last_order_id += 1
+        oid = str(self.last_order_id)
+        cid = client_order_id or str(uuid.uuid4())
+        qty = quantity if quantity else 1.0 # Default para mock
+        
+        order = {
+            'symbol': symbol,
+            'orderId': oid,
+            'clientOrderId': cid,
+            'status': 'FILLED',
+            'side': 'SELL',
+            'type': 'LIMIT',
+            'timeInForce': 'IOC',
+            'price': str(price),
+            'executedQty': str(qty),
+            'cummulativeQuoteQty': str(qty * price),
+            'transactTime': int(time.time() * 1000)
+        }
+        self.orders[cid] = order
+        logger.info(f"[PAPER] Venta LIMIT IOC ejecutada: {symbol} Qty: {qty} @ {price}")
+        return order
+
     async def execute_market_sell(self, symbol: str, quantity: float, client_order_id: str = None):
         self.last_order_id += 1
         oid = str(self.last_order_id)

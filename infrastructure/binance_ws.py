@@ -77,7 +77,7 @@ class BinanceWS:
         if not new_streams: return
         
         self.streams.update(new_streams)
-        if self._ws and self._ws.open:
+        if self._ws and self._ws.state == websockets.State.OPEN:
             payload = {
                 "method": "SUBSCRIBE",
                 "params": new_streams,
@@ -94,7 +94,7 @@ class BinanceWS:
         for s in to_remove:
             self.streams.discard(s)
             
-        if self._ws and self._ws.open:
+        if self._ws and self._ws.state == websockets.State.OPEN:
             payload = {
                 "method": "UNSUBSCRIBE",
                 "params": to_remove,
