@@ -1,5 +1,5 @@
 import asyncio
-import json
+import orjson
 import websockets
 import random
 import time
@@ -12,7 +12,20 @@ class BinanceWS:
         # Usamos /stream para multiplexing
         self.base_url = "wss://stream.binance.com:9443/stream"
         self.market_queue = market_queue
-        self.streams = set(streams or ["!miniTicker@arr"])
+        
+        initial_streams = streams or ["!miniTicker@arr"]
+        # Iniciar sin lower() ciego
+        self.streams = set()
+        for s in initial_streams:
+            if s.startswith("!"):
+                # Los streams globales (!miniTicker, !ticker) se guardan EXACTAMENTE como llegan
+                self.streams.add(s)
+            elif "@" in s:
+                symbol, stream_type = s.split("@", 1)
+                self.streams.add(f"{symbol.lower()}@{stream_type}")
+            else:
+                self.streams.add(s.lower())
+
         self.is_running = False
         self._ws = None
         self._last_msg_time = 0
@@ -42,10 +55,13 @@ class BinanceWS:
 
         while self.is_running:
             try:
+                if not self.streams:
+                    self.streams.add("!miniticker@arr")
+                
                 stream_url = f"{self.base_url}?streams={'/'.join(self.streams)}"
                 logger.info(f"Conectando a Binance WebSocket (Multiplex): {stream_url}")
                 
-                async with websockets.connect(stream_url) as ws:
+                async with websockets.connect(stream_url, ping_interval=20, ping_timeout=10) as ws:
                     self._ws = ws
                     system_state.set_health(HealthStatus.HEALTHY)
                     self._reconnect_delay = 1 # Reset delay on success
@@ -73,38 +89,69 @@ class BinanceWS:
 
     async def subscribe(self, streams: list):
         """Suscribe dinámicamente a nuevos streams."""
-        new_streams = [s for s in streams if s not in self.streams]
+        valid_streams = []
+        for s in streams:
+            if s and isinstance(s, str):
+                # Separamos el símbolo del tipo de stream (ej: 'ALTUSDT@bookTicker')
+                if "@" in s:
+                    symbol, stream_type = s.split("@", 1)
+                    # Solo convertimos el símbolo a minúscula
+                    valid_streams.append(f"{symbol.lower()}@{stream_type}")
+                else:
+                    # Si por alguna razón envían solo el símbolo o algo raro
+                    valid_streams.append(s.lower())
+
+        new_streams = [s for s in valid_streams if s not in self.streams]
+        
         if not new_streams: return
         
         self.streams.update(new_streams)
         if self._ws and self._ws.state == websockets.State.OPEN:
-            payload = {
-                "method": "SUBSCRIBE",
-                "params": new_streams,
-                "id": random.randint(1, 10000)
-            }
-            await self._ws.send(json.dumps(payload))
-            logger.info(f"WS SUBSCRIBE: {new_streams}")
+            try:
+                payload = {
+                    "method": "SUBSCRIBE",
+                    "params": new_streams,
+                    "id": random.randint(1, 10000)
+                }
+                await self._ws.send(orjson.dumps(payload))
+                logger.info(f"WS SUBSCRIBE: {new_streams}")
+            except Exception as e:
+                logger.error(f"Error enviando SUBSCRIBE: {e}")
 
-    async def unsubscribe(self, streams: list):
-        """Desuscribe dinámicamente de streams."""
-        to_remove = [s for s in streams if s in self.streams]
-        if not to_remove: return
+    async def subscribe(self, streams: list):
+        """Suscribe dinámicamente a nuevos streams."""
+        valid_streams = []
+        for s in streams:
+            if not s or not isinstance(s, str):
+                continue                
+            if s.startswith("!"):
+                # Respeta el formato de los streams globales
+                valid_streams.append(s)
+            elif "@" in s:
+                symbol, stream_type = s.split("@", 1)
+                valid_streams.append(f"{symbol.lower()}@{stream_type}")
+            else:
+                valid_streams.append(s.lower())
+        new_streams = [s for s in valid_streams if s not in self.streams]    
+
+        if not new_streams: return
         
-        for s in to_remove:
-            self.streams.discard(s)
-            
+        self.streams.update(new_streams)
+        
         if self._ws and self._ws.state == websockets.State.OPEN:
-            payload = {
-                "method": "UNSUBSCRIBE",
-                "params": to_remove,
-                "id": random.randint(1, 10000)
-            }
-            await self._ws.send(json.dumps(payload))
-            logger.info(f"WS UNSUBSCRIBE: {to_remove}")
+            try:
+                payload = {
+                    "method": "SUBSCRIBE",
+                    "params": new_streams,
+                    "id": int(time.time() * 1000) % 100000 
+                }
+                await self._ws.send(orjson.dumps(payload).decode('utf-8'))
+                logger.info(f"WS SUBSCRIBE: {new_streams}")
+            except Exception as e:
+                logger.error(f"Error enviando SUBSCRIBE: {e}")
 
     async def _process_message(self, message):
-        raw_data = json.loads(message)
+        raw_data = orjson.loads(message)
         
         # En multiplex, la data viene en 'data' y el stream en 'stream'
         if 'stream' in raw_data and 'data' in raw_data:

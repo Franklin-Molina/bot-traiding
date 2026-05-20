@@ -23,6 +23,29 @@ class PaperExchange(ExchangeInterface):
             ]
         }
 
+    async def execute_sniper_buy(self, symbol: str, amount_usd: float, current_ask: float, slippage_tolerance: float = 0.001, client_order_id: str = None):
+        self.last_order_id += 1
+        oid = str(self.last_order_id)
+        cid = client_order_id or str(uuid.uuid4())
+        qty = amount_usd / current_ask
+        
+        order = {
+            'symbol': symbol,
+            'orderId': oid,
+            'clientOrderId': cid,
+            'status': 'FILLED',
+            'side': 'BUY',
+            'type': 'LIMIT',
+            'timeInForce': 'IOC',
+            'price': str(current_ask),
+            'executedQty': str(qty),
+            'cummulativeQuoteQty': str(amount_usd),
+            'transactTime': int(time.time() * 1000)
+        }
+        self.orders[cid] = order
+        logger.info(f"[PAPER] Sniper Buy ejecutada: {symbol} Qty: {qty} @ {current_ask}")
+        return order
+
     async def execute_market_buy(self, symbol: str, quantity: float, client_order_id: str = None):
         self.last_order_id += 1
         oid = str(self.last_order_id)

@@ -1,4 +1,5 @@
 import asyncio
+import time
 from binance.spot import Spot
 from loguru import logger
 from core.config import settings
@@ -11,11 +12,24 @@ class BinanceRest(ExchangeInterface):
             api_secret=api_secret or settings.BINANCE_API_SECRET,
             base_url="https://api.binance.com"
         )
+        self._symbol_info_cache = {}
+        self._time_offset = 0
+
+    async def sync_time(self):
+        """Sincroniza el offset de tiempo con el servidor de Binance."""
+        loop = asyncio.get_event_loop()
+        try:
+            server_time = await loop.run_in_executor(None, self.client.time)
+            local_time = int(time.time() * 1000)
+            self._time_offset = server_time['serverTime'] - local_time
+            logger.info(f"Sincronización de tiempo completa. Offset: {self._time_offset}ms")
+        except Exception as e:
+            logger.error(f"Error sincronizando tiempo: {e}")
 
     async def get_balance(self, asset: str = "USDT"):
         loop = asyncio.get_event_loop()
         try:
-            account = await loop.run_in_executor(None, self.client.account)
+            account = await loop.run_in_executor(None, lambda: self.client.account(recvWindow=10000))
             for balance in account['balances']:
                 if balance['asset'] == asset:
                     return float(balance['free'])
@@ -27,7 +41,7 @@ class BinanceRest(ExchangeInterface):
     async def get_account(self):
         loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(None, self.client.account)
+            return await loop.run_in_executor(None, lambda: self.client.account(recvWindow=10000))
         except Exception as e:
             logger.error(f"Error obteniendo cuenta: {e}")
             return None
@@ -49,11 +63,16 @@ class BinanceRest(ExchangeInterface):
             return []
 
     async def get_symbol_info(self, symbol: str):
+        if symbol in self._symbol_info_cache:
+            return self._symbol_info_cache[symbol]
+            
         loop = asyncio.get_event_loop()
         try:
             exchange_info = await loop.run_in_executor(None, lambda: self.client.exchange_info(symbol=symbol))
             if exchange_info and 'symbols' in exchange_info:
-                return exchange_info['symbols'][0]
+                info = exchange_info['symbols'][0]
+                self._symbol_info_cache[symbol] = info
+                return info
             return None
         except Exception as e:
             logger.error(f"Error obteniendo info de símbolo {symbol}: {e}")
@@ -67,6 +86,56 @@ class BinanceRest(ExchangeInterface):
             logger.error(f"Error obteniendo klines para {symbol}: {e}")
             return []
 
+    async def execute_sniper_buy(self, symbol: str, amount_usd: float, current_ask: float, slippage_tolerance: float = 0.001, client_order_id: str = None):
+        """
+        Ejecuta una orden de compra protegida contra la latencia (LIMIT IOC).
+        """
+        loop = asyncio.get_event_loop()
+        import math
+        import time
+        try:
+            symbol_info = await self.get_symbol_info(symbol)
+            if not symbol_info: return None
+
+            # 1. Obtener filtros de precisión
+            tick_size = 0.0001
+            step_size = 0.01
+            for f in symbol_info['filters']:
+                if f['filterType'] == 'PRICE_FILTER':
+                    tick_size = float(f['tickSize'])
+                if f['filterType'] == 'LOT_SIZE':
+                    step_size = float(f['stepSize'])
+
+            # 2. Calcular precio máximo aceptable
+            max_price = current_ask * (1 + slippage_tolerance)
+            # Redondear hacia abajo al tick size más cercano para no exceder por error de precisión
+            max_price = math.floor(max_price / tick_size) * tick_size
+            
+            # 3. Calcular cantidad a comprar
+            quantity = amount_usd / current_ask
+            quantity = math.floor(quantity / step_size) * step_size
+
+            params = {
+                "symbol": symbol,
+                "side": "BUY",
+                "type": "LIMIT",
+                "timeInForce": "IOC",
+                "quantity": float(f"{quantity:.8f}"),
+                "price": float(f"{max_price:.8f}"),
+                "recvWindow": 10000,
+                "timestamp": int(time.time() * 1000 + self._time_offset)
+            }
+            if client_order_id:
+                params['newClientOrderId'] = client_order_id
+
+            order = await loop.run_in_executor(None, lambda: self.client.new_order(**params))
+            logger.success(f"Sniper BUY ejecutada ({symbol}): {quantity} @ {max_price} (Ask: {current_ask})")
+            return order
+
+        except Exception as e:
+            logger.error(f"Error en sniper buy ({symbol}): {e}")
+            return None
+
     async def execute_market_buy(self, symbol: str, quantity: float, client_order_id: str = None):
         """Ejecuta compra a mercado con idempotencia (client_order_id)."""
         loop = asyncio.get_event_loop()
@@ -75,7 +144,9 @@ class BinanceRest(ExchangeInterface):
                 'symbol': symbol,
                 'side': 'BUY',
                 'type': 'MARKET',
-                'quantity': quantity
+                'quantity': quantity,
+                'recvWindow': 10000,
+                'timestamp': int(time.time() * 1000 + self._time_offset)
             }
             if client_order_id:
                 params['newClientOrderId'] = client_order_id
@@ -121,7 +192,9 @@ class BinanceRest(ExchangeInterface):
                 'type': 'LIMIT',
                 'timeInForce': 'IOC', # Immediate or Cancel
                 'quantity': float(f"{qty_to_sell:.8f}"),
-                'price': float(f"{price:.8f}")
+                'price': float(f"{price:.8f}"),
+                'recvWindow': 10000,
+                'timestamp': int(time.time() * 1000 + self._time_offset)
             }
 
             if client_order_id:
@@ -184,7 +257,9 @@ class BinanceRest(ExchangeInterface):
                 'symbol': symbol,
                 'side': 'SELL',
                 'type': 'MARKET',
-                'quantity': float(f"{qty_to_sell:.8f}")
+                'quantity': float(f"{qty_to_sell:.8f}"),
+                'recvWindow': 10000,
+                'timestamp': int(time.time() * 1000 + self._time_offset)
             }
 
             if client_order_id:
@@ -203,7 +278,11 @@ class BinanceRest(ExchangeInterface):
         """Consulta el estado de una orden por cualquiera de sus IDs."""
         loop = asyncio.get_event_loop()
         try:
-            params = {'symbol': symbol}
+            params = {
+                'symbol': symbol,
+                'recvWindow': 10000,
+                'timestamp': int(time.time() * 1000 + self._time_offset)
+            }
             if client_order_id:
                 params['origClientOrderId'] = client_order_id
             elif exchange_order_id:

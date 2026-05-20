@@ -173,6 +173,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                         # A. Momentum Sostenido (3-5 ticks)
                         prices_list = list(price_buffers[symbol].prices)
                         momentum_ok = False
+                        momentum = 0
                         if len(prices_list) >= 5:
                             momentum = (prices_list[-1] - prices_list[-5]) / prices_list[-5]
                             if momentum > 0.001: # Al menos 0.1% de momentum
@@ -207,14 +208,22 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
 
                         # 4. DISPARO FINAL SI SCORE >= 70
                         if entry_score >= 70 and momentum_ok and spread_ok:
-                            logger.success(f"🚀 GATILLO TÁCTICO: {symbol} Score: {entry_score} | ATR Rel: {atr_rel:.2%} | Price: {current_price}")
+                            # 🚀 ANTICIPACIÓN POR LATENCIA (Sniper Trigger)
+                            # Si el momentum es muy alto (>0.2%), restamos un 0.05% al target
+                            # para compensar el "vuelo" del paquete (500ms-1000ms)
+                            anticipation_factor = 0.0005 if momentum > 0.002 else 0.0
+                            
+                            adjusted_price = current_price * (1 - anticipation_factor)
+                            
+                            logger.success(f"🚀 GATILLO TÁCTICO (Anticipación: {anticipation_factor:.2%}): {symbol} Score: {entry_score} | Price: {current_price} | Adj: {adjusted_price:.4f}")
                             
                             await executor.try_buy(
                                 symbol, 
                                 current_price, 
                                 candidate['score'], 
                                 atr=indicators['atr_14'],
-                                timestamp=tick.get('E')
+                                timestamp=tick.get('E'),
+                                momentum=momentum
                             )
                             # Una vez intentada la compra, lo quitamos de candidatos y desuscribimos si no es posición
                             del active_candidates[symbol]

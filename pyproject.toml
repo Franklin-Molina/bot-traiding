@@ -10,6 +10,7 @@ dependencies = [
     "asyncpg>=0.31.0",
     "binance-connector>=3.13.0",
     "loguru>=0.7.3",
+    "orjson>=3.11.9",
     "pydantic-settings>=2.14.0",
     "redis>=7.4.0",
     "sqlalchemy>=2.0.49",

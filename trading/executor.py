@@ -88,7 +88,7 @@ class TradeExecutor:
     def _generate_client_id(self, prefix: str = "bot") -> str:
         return f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
 
-    async def try_buy(self, symbol: str, price: float, score: int, atr: float = None, timestamp: int = None):
+    async def try_buy(self, symbol: str, price: float, score: int, atr: float = None, timestamp: int = None, momentum: float = 0):
         """Intenta abrir posición con Order State Machine y Idempotencia."""
         start_perf = time.perf_counter()
         
@@ -170,9 +170,16 @@ class TradeExecutor:
 
             await SlotManager.lock_slot(slot.id)
 
-            # 2. Ejecutar en Exchange con Idempotencia
+            # 2. Ejecutar en Exchange con Sniper Buy (Protección contra Slippage y Latencia)
+            # slippage_tolerance = 0.001 (0.1%)
             order_resp = await asyncio.wait_for(
-                self.exchange.execute_market_buy(symbol, float(quantity), client_order_id=client_order_id),
+                self.exchange.execute_sniper_buy(
+                    symbol, 
+                    slot.assigned_capital, 
+                    price, 
+                    slippage_tolerance=0.001, 
+                    client_order_id=client_order_id
+                ),
                 timeout=10
             )
 
@@ -218,9 +225,9 @@ class TradeExecutor:
                     await session.refresh(new_pos)
                     self.active_positions[symbol] = new_pos
                 
-                logger.success(f"COMPRA FILLED: {symbol} @ {fill_price:.4f} (Slippage: {slippage:.2f}%)")
-                await event_logger.log_event("POSITION_OPENED", symbol, {"price": fill_price, "slippage": slippage, "latency": latency})
-                self._send_alert(f"✅ COMPRA: {symbol} a {fill_price:.4f} (Slip: {slippage:.2f}%)")
+                logger.success(f"COMPRA SNIPER FILLED: {symbol} @ {fill_price:.4f} (Slippage: {slippage:.2f}%)")
+                await event_logger.log_event("POSITION_OPENED", symbol, {"price": fill_price, "slippage": slippage, "latency": latency, "momentum": momentum})
+                self._send_alert(f"🎯 SNIPER BUY: {symbol} a {fill_price:.4f} (Slip: {slippage:.2f}%)")
                 self.failure_counter = 0
             else:
                 await self._handle_order_failure(client_order_id, symbol, slot.id)

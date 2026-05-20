@@ -57,6 +57,8 @@ async def main():
 
     # 4. Exchange Interface para Reconciliación
     exchange = PaperExchange() if settings.SIMULATION_MODE else BinanceRest()
+    if not settings.SIMULATION_MODE:
+        await exchange.sync_time()
 
     # 5. Motores
     macro_engine = MacroEngine(strategy_queue)

@@ -13,6 +13,10 @@ class ExchangeInterface(ABC):
         pass
 
     @abstractmethod
+    async def execute_sniper_buy(self, symbol: str, amount_usd: float, current_ask: float, slippage_tolerance: float = 0.001, client_order_id: str = None):
+        pass
+
+    @abstractmethod
     async def execute_market_sell(self, symbol: str, quantity: float, client_order_id: str = None):
         pass
     
