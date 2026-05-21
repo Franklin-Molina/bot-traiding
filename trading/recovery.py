@@ -11,6 +11,7 @@ class RecoveryEngine:
     def __init__(self):
         self.binance = BinanceRest()
         self._warmup_symbols = set()
+        self.recovery_started = set()
 
     def is_in_warmup(self, symbol: str) -> bool:
         return symbol in self._warmup_symbols
@@ -48,14 +49,15 @@ class RecoveryEngine:
                 buffer.add(float(k[4]))
             
             logger.success(f"✅ Estado de {symbol} reconstruido. Saliendo de Warmup.")
-            self._warmup_symbols.remove(symbol)
-            
-            if not self._warmup_symbols:
-                system_state.set_health(HealthStatus.HEALTHY)
                 
         except Exception as e:
             logger.exception(f"Error crítico en recuperación de {symbol}: {e}")
             system_state.set_health(HealthStatus.DEGRADED)
+        finally:
+            self.recovery_started.discard(symbol)
+            self._warmup_symbols.discard(symbol)
+            if not self._warmup_symbols and system_state.health != HealthStatus.DEGRADED:
+                system_state.set_health(HealthStatus.HEALTHY)
 
     def _interval_to_ms(self, interval: str) -> int:
         units = {'m': 60, 'h': 3600, 'd': 86400}

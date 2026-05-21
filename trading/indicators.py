@@ -20,6 +20,9 @@ class TA:
 
     @staticmethod
     def calculate_rsi(prices: list, period: int = 14):
+        """
+        Cálculo de RSI con suavizado de Wilder.
+        """
         if len(prices) < period + 1:
             return 50.0
         
@@ -31,9 +34,15 @@ class TA:
             gains.append(max(diff, 0))
             losses.append(abs(min(diff, 0)))
             
+        # Primer promedio (Simple)
         avg_gain = sum(gains[:period]) / period
         avg_loss = sum(losses[:period]) / period
         
+        # Promedios subsiguientes (Wilder)
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            
         if avg_loss == 0:
             return 100.0
             
@@ -43,7 +52,7 @@ class TA:
     @staticmethod
     def calculate_atr(highs: list, lows: list, closes: list, period: int = 14):
         """
-        Cálculo de Average True Range (ATR).
+        Cálculo de Average True Range (ATR) con suavizado de Wilder.
         """
         if len(closes) < period + 1:
             return None
@@ -58,8 +67,8 @@ class TA:
             tr_list.append(tr)
             
         atr = sum(tr_list[:period]) / period
-        for tr in tr_list[period:]:
-            atr = (atr * (period - 1) + tr) / period
+        for i in range(period, len(tr_list)):
+            atr = (atr * (period - 1) + tr_list[i]) / period
         return atr
 
     @staticmethod
@@ -72,8 +81,10 @@ class TA:
             return "NORMAL"
         
         current_price = prices[-1]
-        mean_price = sum(prices[-20:]) / 20
-        std_dev = (sum((x - mean_price)**2 for x in prices[-20:]) / 20)**0.5
+        # Usar los últimos 20 precios para estadísticas locales
+        subset = list(prices)[-20:]
+        mean_price = sum(subset) / 20
+        std_dev = (sum((x - mean_price)**2 for x in subset) / 20)**0.5
         
         # Bollinger Bandwidth as proxy for compression/expansion
         bandwidth = (std_dev * 4) / mean_price if mean_price > 0 else 0
@@ -92,30 +103,118 @@ class TA:
 
 class PriceBuffer:
     """
-    Buffer dinámico con soporte para Warmup y métricas de volatilidad.
+    Buffer dinámico con soporte para indicadores incrementales.
     """
     def __init__(self, maxlen: int = 100):
         self.prices = deque(maxlen=maxlen)
         self.highs = deque(maxlen=maxlen)
         self.lows = deque(maxlen=maxlen)
-        self.last_atr = None
+        
+        # Estados para indicadores incrementales
+        self._ema_20 = None
+        self._avg_gain_14 = None
+        self._avg_loss_14 = None
+        self._atr_14 = None
+        self._last_price = None
         self._tick_count = 0
 
     def add(self, price: float, high: float = None, low: float = None):
+        h = high or price
+        l = low or price
+        
+        # 1. Actualización de EMA 20 (Incremental)
+        if self._ema_20 is None:
+            if len(self.prices) == 19: # Estamos a punto de tener 20
+                temp_prices = list(self.prices) + [price]
+                self._ema_20 = sum(temp_prices) / 20
+        else:
+            alpha = 2 / (20 + 1)
+            self._ema_20 = (price - self._ema_20) * alpha + self._ema_20
+            
+        # 2. Actualización de RSI 14 (Incremental con Wilder)
+        if self._last_price is not None:
+            gain = max(price - self._last_price, 0)
+            loss = abs(min(price - self._last_price, 0))
+            
+            if self._avg_gain_14 is None:
+                if len(self.prices) >= 14: # Aproximación inicial tras tener suficientes datos
+                    # Esto se activará una sola vez cuando el buffer se llene
+                    # Para mayor precisión inicial, podríamos esperar a tener exactamente 14 diffs
+                    pass 
+            else:
+                self._avg_gain_14 = (self._avg_gain_14 * 13 + gain) / 14
+                self._avg_loss_14 = (self._avg_loss_14 * 13 + loss) / 14
+        
+        # 3. Actualización de ATR 14 (Incremental)
+        if self._last_price is not None:
+            tr = max(h - l, abs(h - self._last_price), abs(l - self._last_price))
+            if self._atr_14 is None:
+                if len(self.prices) >= 14:
+                    pass
+            else:
+                self._atr_14 = (self._atr_14 * 13 + tr) / 14
+
+        # Añadir a deques
         self.prices.append(price)
-        self.highs.append(high or price)
-        self.lows.append(low or price)
+        self.highs.append(h)
+        self.lows.append(l)
+        self._last_price = price
         self._tick_count += 1
+        
+        # Recalcular bases si aún no están inicializadas (Warmup)
+        if self._tick_count == 20 and self._ema_20 is None:
+             self._ema_20 = TA.calculate_ema(list(self.prices), 20)
+        
+        if self._tick_count == 15: # 14 diferencias
+            self._initialize_rsi_atr()
+
+    def _initialize_rsi_atr(self):
+        """Inicialización de promedios para RSI y ATR tras fase de warmup."""
+        prices = list(self.prices)
+        highs = list(self.highs)
+        lows = list(self.lows)
+        
+        if len(prices) < 15: return
+        
+        # RSI Base
+        gains = []
+        losses = []
+        for i in range(1, 15):
+            diff = prices[i] - prices[i-1]
+            gains.append(max(diff, 0))
+            losses.append(abs(min(diff, 0)))
+        self._avg_gain_14 = sum(gains) / 14
+        self._avg_loss_14 = sum(losses) / 14
+        
+        # ATR Base
+        tr_list = []
+        for i in range(1, 15):
+            tr = max(highs[i] - lows[i], abs(highs[i] - prices[i-1]), abs(lows[i] - prices[i-1]))
+            tr_list.append(tr)
+        self._atr_14 = sum(tr_list) / 14
 
     def get_indicators(self, update_atr: bool = False):
-        indicators = {
-            "ema_20": TA.calculate_ema(list(self.prices), 20),
-            "rsi_14": TA.calculate_rsi(list(self.prices), 14)
-        }
+        """
+        Retorna indicadores precalculados incrementalmente.
+        `update_atr` se mantiene por compatibilidad de firma pero el cálculo es ahora incremental.
+        """
+        # Si aún no tenemos los incrementales (warmup), usamos los métodos estáticos lentos
+        # Esto solo ocurre al principio
+        if self._ema_20 is None or self._avg_gain_14 is None:
+            return {
+                "ema_20": TA.calculate_ema(list(self.prices), 20),
+                "rsi_14": TA.calculate_rsi(list(self.prices), 14),
+                "atr_14": TA.calculate_atr(list(self.highs), list(self.lows), list(self.prices), 14)
+            }
         
-        # Optimización: Solo recalcular ATR si se solicita (ej. microbatch o candle close)
-        if update_atr or self.last_atr is None:
-            self.last_atr = TA.calculate_atr(list(self.highs), list(self.lows), list(self.prices), 14)
+        # RSI dinámico
+        rsi = 100.0
+        if self._avg_loss_14 > 0:
+            rs = self._avg_gain_14 / self._avg_loss_14
+            rsi = 100 - (100 / (1 + rs))
             
-        indicators["atr_14"] = self.last_atr
-        return indicators
+        return {
+            "ema_20": self._ema_20,
+            "rsi_14": rsi,
+            "atr_14": self._atr_14
+        }

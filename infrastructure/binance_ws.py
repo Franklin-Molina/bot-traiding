@@ -14,11 +14,9 @@ class BinanceWS:
         self.market_queue = market_queue
         
         initial_streams = streams or ["!miniTicker@arr"]
-        # Iniciar sin lower() ciego
         self.streams = set()
         for s in initial_streams:
             if s.startswith("!"):
-                # Los streams globales (!miniTicker, !ticker) se guardan EXACTAMENTE como llegan
                 self.streams.add(s)
             elif "@" in s:
                 symbol, stream_type = s.split("@", 1)
@@ -31,7 +29,7 @@ class BinanceWS:
         self._last_msg_time = 0
         self._reconnect_delay = 1
         self._max_reconnect_delay = 3
-        
+
         # Métricas
         self.msg_count = 0
         self.discarded_count = 0
@@ -43,8 +41,7 @@ class BinanceWS:
         Mantiene la conexión WebSocket activa con reconexión rápida y watchdog.
         """
         self.is_running = True
-        
-        # Iniciar Watchdog
+
         watchdog_task = asyncio.create_task(self._watchdog())
         system_state.task_registry.register(watchdog_task, "WS_Watchdog")
 
@@ -56,118 +53,71 @@ class BinanceWS:
         while self.is_running:
             try:
                 if not self.streams:
-                    self.streams.add("!miniticker@arr")
-                
+                    self.streams.add("!miniTicker@arr")
+
                 stream_url = f"{self.base_url}?streams={'/'.join(self.streams)}"
                 logger.info(f"Conectando a Binance WebSocket (Multiplex): {stream_url}")
-                
-                async with websockets.connect(stream_url, ping_interval=20, ping_timeout=10) as ws:
+
+                async with websockets.connect(
+                    stream_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    max_size=10**7,
+                    max_queue=2**6
+                ) as ws:
                     self._ws = ws
                     system_state.set_health(HealthStatus.HEALTHY)
-                    self._reconnect_delay = 1 # Reset delay on success
+                    self._reconnect_delay = 1
                     logger.success("Conexión WebSocket establecida.")
-                    
-                    while self.is_running:
-                        try:
-                            # Timeout para asegurar que el loop no se bloquee si ws.recv() tarda
-                            message = await asyncio.wait_for(ws.recv(), timeout=5.0)
+
+                    try:
+                        async for message in ws:
+                            if not self.is_running:
+                                break
                             self._last_msg_time = time.time()
-                            await self._process_message(message)
-                        except asyncio.TimeoutError:
-                            continue # El watchdog se encargará si esto persiste
-                        
-            except (websockets.exceptions.ConnectionClosed, Exception) as e:
+                            # Fire & Forget: ws.recv() nunca se bloquea
+                            asyncio.create_task(self._parse_and_route(message))
+
+                    except websockets.exceptions.ConnectionClosed as e:
+                        logger.warning(f"Conexión cerrada por el servidor: {e}")
+
+            except Exception as e:
                 system_state.set_health(HealthStatus.DEGRADED)
                 if not self.is_running:
                     break
-                
-                # Exponential backoff con jitter
+
                 sleep_time = min(self._reconnect_delay, self._max_reconnect_delay) + random.uniform(0, 0.5)
-                logger.warning(f"WebSocket desconectado ({e}). Reintentando en {sleep_time:.2f}s...")
+                logger.warning(f"Reintentando conexión en {sleep_time:.2f}s... Error: {e}")
                 await asyncio.sleep(sleep_time)
                 self._reconnect_delay *= 1.5
 
-    async def subscribe(self, streams: list):
-        """Suscribe dinámicamente a nuevos streams."""
-        valid_streams = []
-        for s in streams:
-            if s and isinstance(s, str):
-                # Separamos el símbolo del tipo de stream (ej: 'ALTUSDT@bookTicker')
-                if "@" in s:
-                    symbol, stream_type = s.split("@", 1)
-                    # Solo convertimos el símbolo a minúscula
-                    valid_streams.append(f"{symbol.lower()}@{stream_type}")
-                else:
-                    # Si por alguna razón envían solo el símbolo o algo raro
-                    valid_streams.append(s.lower())
+    async def _parse_and_route(self, message):
+        """
+        Parsea el mensaje JSON y lo enruta a la cola de mercado.
+        Versión activa con backpressure extremo (purga al 90%).
+        """
+        try:
+            raw_data = orjson.loads(message)
+        except Exception:
+            self.discarded_count += 1
+            return
 
-        new_streams = [s for s in valid_streams if s not in self.streams]
-        
-        if not new_streams: return
-        
-        self.streams.update(new_streams)
-        if self._ws and self._ws.state == websockets.State.OPEN:
-            try:
-                payload = {
-                    "method": "SUBSCRIBE",
-                    "params": new_streams,
-                    "id": random.randint(1, 10000)
-                }
-                await self._ws.send(orjson.dumps(payload))
-                logger.info(f"WS SUBSCRIBE: {new_streams}")
-            except Exception as e:
-                logger.error(f"Error enviando SUBSCRIBE: {e}")
-
-    async def subscribe(self, streams: list):
-        """Suscribe dinámicamente a nuevos streams."""
-        valid_streams = []
-        for s in streams:
-            if not s or not isinstance(s, str):
-                continue                
-            if s.startswith("!"):
-                # Respeta el formato de los streams globales
-                valid_streams.append(s)
-            elif "@" in s:
-                symbol, stream_type = s.split("@", 1)
-                valid_streams.append(f"{symbol.lower()}@{stream_type}")
-            else:
-                valid_streams.append(s.lower())
-        new_streams = [s for s in valid_streams if s not in self.streams]    
-
-        if not new_streams: return
-        
-        self.streams.update(new_streams)
-        
-        if self._ws and self._ws.state == websockets.State.OPEN:
-            try:
-                payload = {
-                    "method": "SUBSCRIBE",
-                    "params": new_streams,
-                    "id": int(time.time() * 1000) % 100000 
-                }
-                await self._ws.send(orjson.dumps(payload).decode('utf-8'))
-                logger.info(f"WS SUBSCRIBE: {new_streams}")
-            except Exception as e:
-                logger.error(f"Error enviando SUBSCRIBE: {e}")
-
-    async def _process_message(self, message):
-        raw_data = orjson.loads(message)
-        
-        # En multiplex, la data viene en 'data' y el stream en 'stream'
-        if 'stream' in raw_data and 'data' in raw_data:
+        # En multiplex, la data viene dentro de 'data' y el stream en 'stream'
+        if isinstance(raw_data, dict) and 'stream' in raw_data and 'data' in raw_data:
             data = raw_data['data']
         else:
             data = raw_data
 
-        now = time.time() * 1000 # ms
-        
-        # Extraer event time de Binance (E) si existe
+        # --- Métricas de latencia ---
+        now = time.time() * 1000  # ms
+
         event_time = 0
         if isinstance(data, list) and len(data) > 0:
-            event_time = data[0].get('E', 0)
+            if isinstance(data[0], dict):
+                event_time = data[0].get('E', 0)
         elif isinstance(data, dict):
             event_time = data.get('E', 0)
-            
+
         if event_time > 0:
             lag = now - event_time
             self.total_lag += lag
@@ -176,68 +126,106 @@ class BinanceWS:
                 avg_lag = self.total_lag / self.msg_count
                 elapsed = time.time() - self.start_time
                 tps = self.msg_count / elapsed if elapsed > 0 else 0
-                logger.debug(f"WS Metrics | Lag: {lag:.2f}ms | Avg: {avg_lag:.2f}ms | TPS: {tps:.2f}")
+                logger.info(
+                    f"WS Metrics | Lag: {lag:.2f}ms | Avg: {avg_lag:.2f}ms "
+                    f"| TPS: {tps:.2f} | Q: {self.market_queue.qsize()}"
+                )
 
-        # 🚀 Adaptive Load Shedding
-        # Si la cola está a más del 80%, filtramos mensajes no críticos
-        queue_fill_pct = self.market_queue.qsize() / self.market_queue.maxsize if self.market_queue.maxsize > 0 else 0
-        
-        if queue_fill_pct > 0.8:
+        # --- Backpressure ---
+        q_size = self.market_queue.qsize()
+        max_q = self.market_queue.maxsize
+
+        # Nivel crítico (>90%): purga la mitad de la cola
+        if max_q > 0 and q_size > max_q * 0.9:
+            logger.warning(f"⚠️ PURGA DE EMERGENCIA: Cola WS al {q_size}. Tirando datos viejos.")
+            for _ in range(int(q_size * 0.5)):
+                try:
+                    self.market_queue.get_nowait()
+                    self.market_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+            return
+
+        # Nivel alto (>50%): descartar mensajes no críticos
+        elif max_q > 0 and q_size > max_q * 0.5:
             if not self._is_critical_message(data):
                 self.discarded_count += 1
-                return # Descartar tick tranquilo para dar aire al procesador
+                return
 
-        # Backpressure extremo: si está llena, descartar el más antiguo
-        if self.market_queue.full():
+        # Encolar
+        try:
+            self.market_queue.put_nowait(data)
+        except asyncio.QueueFull:
             self.discarded_count += 1
+
+    async def subscribe(self, streams: list):
+        """Suscribe dinámicamente a nuevos streams en caliente."""
+        valid_streams = []
+        for s in streams:
+            if not s or not isinstance(s, str):
+                continue
+            if s.startswith("!"):
+                valid_streams.append(s)
+            elif "@" in s:
+                symbol, stream_type = s.split("@", 1)
+                valid_streams.append(f"{symbol.lower()}@{stream_type}")
+            else:
+                valid_streams.append(s.lower())
+
+        new_streams = [s for s in valid_streams if s not in self.streams]
+
+        if not new_streams:
+            return
+
+        self.streams.update(new_streams)
+
+        if self._ws and self._ws.state == websockets.State.OPEN:
             try:
-                self.market_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        
-        await self.market_queue.put(data)
+                payload = {
+                    "method": "SUBSCRIBE",
+                    "params": new_streams,
+                    "id": int(time.time() * 1000) % 100000
+                }
+                await self._ws.send(orjson.dumps(payload).decode('utf-8'))
+                logger.info(f"WS SUBSCRIBE: {new_streams}")
+            except Exception as e:
+                logger.error(f"Error enviando SUBSCRIBE: {e}")
 
     def _is_critical_message(self, data) -> bool:
         """
         Determina si un mensaje es crítico basándose en volatilidad o volumen.
-        Prioriza: Picos de precio (>0.5% en un tick) o volumen masivo.
+        Prioriza: picos de precio >0.5% en un tick o volumen alto.
         """
         try:
-            # miniTicker@arr es una lista
             if isinstance(data, list):
                 for tick in data:
-                    # 'c' current, 'o' open
                     c = float(tick.get('c', 0))
                     o = float(tick.get('o', 0))
-                    if o > 0 and abs(c/o - 1) > 0.005: # Movimiento > 0.5%
+                    if o > 0 and abs(c / o - 1) > 0.005:
                         return True
-                    if float(tick.get('v', 0)) > 100: # Volumen arbitrario alto para miniTicker
+                    if float(tick.get('v', 0)) > 100:
                         return True
             return False
-        except:
-            return True # Ante la duda, es crítico
+        except Exception:
+            return True  # Ante la duda, es crítico
 
     async def _watchdog(self):
         """
-        Detecta conexiones zombie basándose en el tráfico esperado.
+        Detecta conexiones zombie si no llegan mensajes en >10s.
         """
         logger.info("Watchdog de WebSocket iniciado.")
         while self.is_running:
-            await asyncio.sleep(2) # Revisar cada 2 segundos
-            
+            await asyncio.sleep(2)
+
             if self._last_msg_time == 0:
                 continue
-                
+
             elapsed = time.time() - self._last_msg_time
-            
-            # Timeout dinámico: si no hay mensajes en 10s (para miniTicker que es frecuente)
-            # En un sistema real, esto se ajustaría por stream.
+
             if elapsed > 10.0:
                 logger.error(f"¡CONEXIÓN ZOMBIE DETECTADA! ({elapsed:.2f}s sin datos). Reiniciando...")
                 system_state.set_health(HealthStatus.RECOVERING)
-                # Forzar cierre si es necesario (el loop principal de connect reintentará)
-                # Aquí podríamos lanzar una excepción o simplemente esperar que el timeout de wait_for falle
-                self._last_msg_time = time.time() # Reset para no spamear logs
+                self._last_msg_time = time.time()  # Reset para no spamear logs
 
     def stop(self):
         self.is_running = False
