@@ -129,155 +129,289 @@ class TradeExecutor:
     def _generate_client_id(self, prefix: str = "bot") -> str:
         return f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
 
-    async def try_buy(self, symbol: str, price: float, score: int, atr: float = None, timestamp: int = None, momentum: float = 0):
-        """Intenta abrir posición con Order State Machine y Idempotencia."""
-        start_perf = time.perf_counter()
-        
-        # 🔴 BLOQUEO DE SEGURIDAD: No operar sin ATR o con ATR inválido
-        if atr is None or price <= 0:
-            logger.warning(f"Compra abortada para {symbol}: ATR o precio inválido")
+    # ============================
+# NUEVA LÓGICA MOMENTUM RIDING
+# SIN TAKE PROFIT FIJO
+# SOLO TRAILING DINÁMICO
+# ============================
+
+async def try_buy(
+    self,
+    symbol: str,
+    price: float,
+    score: int,
+    atr: float = None,
+    timestamp: int = None,
+    momentum: float = 0
+):
+    start_perf = time.perf_counter()
+
+    # 🔴 Validación ATR
+    if atr is None or price <= 0:
+        logger.warning(f"Compra abortada para {symbol}: ATR o precio inválido")
+        return
+
+    atr_rel = atr / price
+
+    if atr_rel < settings.MIN_ATR_RELATIVE:
+        logger.warning(
+            f"Compra abortada para {symbol}: "
+            f"Volatilidad insuficiente ({atr_rel:.2%})"
+        )
+        return
+
+    # Cooldown
+    now = time.time()
+
+    if symbol in self.cooldowns:
+        if now < self.cooldowns[symbol]:
+            return
+        else:
+            del self.cooldowns[symbol]
+
+    if system_state.health not in [
+        HealthStatus.HEALTHY,
+        HealthStatus.RECOVERING
+    ]:
+        return
+
+    if symbol in self.pending_orders:
+        return
+
+    if symbol in self.active_positions:
+        return
+
+    used_slots = await SlotManager.get_used_slots()
+    total_slots = await SlotManager.get_total_slots()
+
+    logger.info(f"Slots activos: {used_slots} / {total_slots}")
+    logger.info(f"Active positions: {list(self.active_positions.keys())}")
+
+    slot = await SlotManager.get_available_slot()
+
+    if not slot:
+        logger.warning(f"Portfolio Risk: Sin slots disponibles para {symbol}")
+        return
+
+    logger.info(f"Intentando BUY {symbol} | Active: {len(self.active_positions)}")
+
+    self.pending_orders.add(symbol)
+
+    client_order_id = self._generate_client_id("buy")
+
+    try:
+
+        symbol_info = await asyncio.wait_for(
+            self.exchange.get_symbol_info(symbol),
+            timeout=5
+        )
+
+        if not symbol_info:
             return
 
-        # 1. ATR RELATIVO (En lugar de absoluto)
-        atr_rel = atr / price
-        if atr_rel < settings.MIN_ATR_RELATIVE:
-            logger.warning(f"Compra abortada para {symbol}: Volatilidad insuficiente ({atr_rel:.2%})")
+        quantity = self._calculate_quantity(
+            slot.assigned_capital,
+            price,
+            symbol_info
+        )
+
+        if quantity <= 0:
             return
 
-        # 🕒 VERIFICACIÓN DE COOLDOWN
-        now = time.time()
-        if symbol in self.cooldowns:
-            if now < self.cooldowns[symbol]:
-                # Logger silencioso para cooldown
-                return
-            else:
-                del self.cooldowns[symbol]
-
-        if system_state.health not in [HealthStatus.HEALTHY, HealthStatus.RECOVERING]:
+        if not self._validate_notional(quantity, price, symbol_info):
             return
 
-        if symbol in self.pending_orders or symbol in self.active_positions:
-            return
+        # Registrar orden
+        async with async_session() as session:
 
-        # Validación Portfolio-Level Risk (Capacidad de slots)
-        used_slots = await SlotManager.get_used_slots()
-        total_slots = await SlotManager.get_total_slots()
-        logger.info(f"Slots activos: {used_slots} / {total_slots}")
-        logger.info(f"Active positions: {list(self.active_positions.keys())}")
-        
-        slot = await SlotManager.get_available_slot()
-        if not slot:
-            logger.warning(f"Portfolio Risk: Sin slots disponibles para {symbol}")
-            return
-
-        logger.info(f"Intentando BUY {symbol} | Active: {len(self.active_positions)}")
-
-        self.pending_orders.add(symbol)
-        client_order_id = self._generate_client_id("buy")
-        
-        try:
-            symbol_info = await asyncio.wait_for(self.exchange.get_symbol_info(symbol), timeout=5)
-            if not symbol_info: return
-
-            quantity = self._calculate_quantity(slot.assigned_capital, price, symbol_info)
-            if quantity <= 0 or not self._validate_notional(quantity, price, symbol_info):
-                return
-
-            # 1. Registrar Orden en DB (Estado PENDING/SUBMITTED) antes de enviar
-            async with async_session() as session:
-                db_order = Order(
-                    client_order_id=client_order_id,
-                    symbol=symbol,
-                    side="BUY",
-                    status=OrderStatus.SUBMITTED,
-                    price=price,
-                    quantity=float(quantity)
-                )
-                session.add(db_order)
-                await session.commit()
-                await event_logger.log_event("ORDER_SUBMITTED", symbol, {"cid": client_order_id, "price": price})
-
-            # Risk parameters: Usar ATR para SL/TP dinámico
-            # Según recomendación: SL = entry - (atr * 2.5), TP = entry + (atr * 4)
-            sl_dist = atr * 2.5 
-            
-            # Asegurar un SL mínimo del 0.5% y máximo del 5% para evitar locuras
-            min_sl_dist = price * 0.005
-            max_sl_dist = price * 0.05
-            sl_dist = max(min(sl_dist, max_sl_dist), min_sl_dist)
-
-            stop_loss = price - sl_dist
-            take_profit = price + (atr * 4.0) # RR mejorado basado en ATR
-
-            await SlotManager.lock_slot(slot.id)
-
-            # 2. Ejecutar en Exchange con Sniper Buy (Protección contra Slippage y Latencia)
-            # slippage_tolerance = 0.001 (0.1%)
-            order_resp = await asyncio.wait_for(
-                self.exchange.execute_sniper_buy(
-                    symbol, 
-                    slot.assigned_capital, 
-                    price, 
-                    slippage_tolerance=0.001, 
-                    client_order_id=client_order_id
-                ),
-                timeout=10
+            db_order = Order(
+                client_order_id=client_order_id,
+                symbol=symbol,
+                side="BUY",
+                status=OrderStatus.SUBMITTED,
+                price=price,
+                quantity=float(quantity)
             )
 
-            if order_resp:
-                # 3. Procesar respuesta y Slippage
-                fill_price = float(order_resp.get('price', price))
-                if 'cummulativeQuoteQty' in order_resp and float(order_resp['executedQty']) > 0:
-                    fill_price = float(order_resp['cummulativeQuoteQty']) / float(order_resp['executedQty'])
-                
-                slippage = ((fill_price / price) - 1) * 100
-                latency = (time.perf_counter() - start_perf) * 1000
+            session.add(db_order)
 
-                # 🛡️ PROTECCIÓN DE SLIPPAGE (Máximo MAX_SLIPPAGE_PERCENT)
-                if slippage > (settings.MAX_SLIPPAGE_PERCENT * 100):
-                    logger.warning(f"⚠️ ALTO SLIPPAGE DETECTADO: {symbol} @ {slippage:.2f}%")
-                    # Podríamos decidir salir inmediatamente, pero por ahora solo alertamos
-                    # y dejamos que el sistema gestione la posición
+            await session.commit()
 
-                async with async_session() as session:
-                    # Actualizar Orden
-                    from sqlalchemy import update
-                    await session.execute(update(Order).where(Order.client_order_id == client_order_id).values(
+            await event_logger.log_event(
+                "ORDER_SUBMITTED",
+                symbol,
+                {
+                    "cid": client_order_id,
+                    "price": price
+                }
+            )
+
+        # ============================
+        # STOP LOSS DINÁMICO ATR
+        # ============================
+
+        sl_dist = atr * 2.5
+
+        min_sl_dist = price * 0.005
+        max_sl_dist = price * 0.05
+
+        sl_dist = max(
+            min(sl_dist, max_sl_dist),
+            min_sl_dist
+        )
+
+        stop_loss = price - sl_dist
+
+        await SlotManager.lock_slot(slot.id)
+
+        # ============================
+        # SNIPER BUY
+        # ============================
+
+        order_resp = await asyncio.wait_for(
+            self.exchange.execute_sniper_buy(
+                symbol,
+                slot.assigned_capital,
+                price,
+                slippage_tolerance=0.001,
+                client_order_id=client_order_id
+            ),
+            timeout=10
+        )
+
+        if order_resp:
+
+            fill_price = float(order_resp.get('price', price))
+
+            if (
+                'cummulativeQuoteQty' in order_resp and
+                float(order_resp['executedQty']) > 0
+            ):
+                fill_price = (
+                    float(order_resp['cummulativeQuoteQty']) /
+                    float(order_resp['executedQty'])
+                )
+
+            slippage = ((fill_price / price) - 1) * 100
+
+            latency = (
+                (time.perf_counter() - start_perf) * 1000
+            )
+
+            if slippage > (
+                settings.MAX_SLIPPAGE_PERCENT * 100
+            ):
+                logger.warning(
+                    f"⚠️ ALTO SLIPPAGE DETECTADO: "
+                    f"{symbol} @ {slippage:.2f}%"
+                )
+
+            # ============================
+            # CREAR POSICIÓN
+            # SIN TAKE PROFIT
+            # ============================
+
+            async with async_session() as session:
+
+                from sqlalchemy import update
+
+                await session.execute(
+                    update(Order)
+                    .where(Order.client_order_id == client_order_id)
+                    .values(
                         status=OrderStatus.FILLED,
                         fill_price=fill_price,
-                        executed_quantity=float(order_resp.get('executedQty', quantity)),
-                        exchange_order_id=str(order_resp.get('orderId'))
-                    ))
-                    
-                    # Crear Posición
-                    new_pos = Position(
-                        symbol=symbol,
-                        buy_price=fill_price, # Usamos el precio real
-                        quantity=float(order_resp.get('executedQty', quantity)),
-                        slot_id=slot.id,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        highest_price=fill_price,
-                        last_sl_update_price=fill_price,
-                        status="OPEN"
+                        executed_quantity=float(
+                            order_resp.get(
+                                'executedQty',
+                                quantity
+                            )
+                        ),
+                        exchange_order_id=str(
+                            order_resp.get('orderId')
+                        )
                     )
-                    session.add(new_pos)
-                    await session.commit()
-                    await session.refresh(new_pos)
-                    self.active_positions[symbol] = new_pos
-                
-                logger.success(f"COMPRA SNIPER FILLED: {symbol} @ {fill_price:.4f} (Slippage: {slippage:.2f}%)")
-                await event_logger.log_event("POSITION_OPENED", symbol, {"price": fill_price, "slippage": slippage, "latency": latency, "momentum": momentum})
-                self._send_alert(f"🎯 SNIPER BUY: {symbol} a {fill_price:.4f} (Slip: {slippage:.2f}%)")
-                self.failure_counter = 0
-            else:
-                await self._handle_order_failure(client_order_id, symbol, slot.id)
+                )
 
-        except Exception as e:
-            logger.error(f"Error crítico en try_buy {symbol}: {e}")
-            await self._handle_order_failure(client_order_id, symbol, slot.id)
-        finally:
-            self.pending_orders.discard(symbol)
+                new_pos = Position(
+                    symbol=symbol,
+                    buy_price=fill_price,
+                    quantity=float(
+                        order_resp.get(
+                            'executedQty',
+                            quantity
+                        )
+                    ),
+                    slot_id=slot.id,
+
+                    # ============================
+                    # SOLO STOP LOSS
+                    # ============================
+
+                    stop_loss=stop_loss,
+
+                    # TP eliminado
+                    take_profit=None,
+
+                    highest_price=fill_price,
+                    last_sl_update_price=fill_price,
+
+                    status="OPEN"
+                )
+
+                session.add(new_pos)
+
+                await session.commit()
+
+                await session.refresh(new_pos)
+
+                self.active_positions[symbol] = new_pos
+
+            logger.success(
+                f"COMPRA MOMENTUM FILLED: "
+                f"{symbol} @ {fill_price:.6f} "
+                f"(Slip: {slippage:.2f}%)"
+            )
+
+            await event_logger.log_event(
+                "POSITION_OPENED",
+                symbol,
+                {
+                    "price": fill_price,
+                    "slippage": slippage,
+                    "latency": latency,
+                    "momentum": momentum
+                }
+            )
+
+            self._send_alert(
+                f"🎯 MOMENTUM BUY: "
+                f"{symbol} @ {fill_price:.6f}"
+            )
+
+            self.failure_counter = 0
+
+        else:
+            await self._handle_order_failure(
+                client_order_id,
+                symbol,
+                slot.id
+            )
+
+    except Exception as e:
+
+        logger.error(
+            f"Error crítico en try_buy {symbol}: {e}"
+        )
+
+        await self._handle_order_failure(
+            client_order_id,
+            symbol,
+            slot.id
+        )
+
+    finally:
+        self.pending_orders.discard(symbol)
 
     async def _handle_order_failure(self, client_order_id: str, symbol: str, slot_id: int):
         self.failure_counter += 1
@@ -289,72 +423,165 @@ class TradeExecutor:
         if self.failure_counter >= self.max_failures:
             system_state.set_health(HealthStatus.DEGRADED)
 
-    async def monitor_and_exit(self, symbol: str, current_price: float, atr: float = None):
-        if symbol not in self.active_positions: return
+    async def monitor_and_exit(self, symbol: str, current_price: float, atr: float = None ):
+
+        if symbol not in self.active_positions:
+            return
+
         pos = self.active_positions[symbol]
-        
-        # 🕒 TIEMPO MÍNIMO DE PERMANENCIA (30 segundos)
-        # Solo aplicable a salidas automáticas (SL/TP), no a pánico
+
         from datetime import datetime, UTC
-        seconds_in_trade = (datetime.now(UTC) - pos.opened_at).total_seconds()
-        
-        # Asegurar inicialización de highest_price
+
+        seconds_in_trade = (
+            datetime.now(UTC) - pos.opened_at
+        ).total_seconds()
+
+        # ============================
+        # INIT
+        # ============================
+
         if pos.highest_price is None:
             pos.highest_price = pos.buy_price
 
-        # 1. Trailing Stop con ATR Dinámico
-        if current_price > pos.highest_price:
-            pos.highest_price = current_price
-            
-            # Si tenemos ATR, usamos ATR * 1.5, si no, usamos el porcentaje por defecto
-            if atr:
-                new_sl = current_price - (atr * 1.5)
-            else:
-                new_sl = current_price * (1 - settings.TRAILING_STOP_PERCENT)
-            
-            # Umbral de Hysteresis: Evitar spam de DB si el cambio es ínfimo
-            change_pct = (current_price / (pos.last_sl_update_price or pos.buy_price) - 1) * 100
-            if new_sl > pos.stop_loss and change_pct > 0.1: # 0.1% threshold
-                pos.stop_loss = new_sl
-                pos.last_sl_update_price = current_price
-                persistence_manager.enqueue_position_update(pos.id, {
-                    "stop_loss": new_sl,
-                    "highest_price": current_price,
-                    "last_sl_update_price": current_price
-                })
-            else:
-                # Persistir highest_price incluso si el SL no se mueve (Hysteresis)
-                persistence_manager.enqueue_position_update(pos.id, {
-                    "highest_price": current_price
-                })
+        # ============================
+        # NUEVO MÁXIMO
+        # ============================
 
-        # 2. Verificación de Salida
+        if current_price > pos.highest_price:
+
+            pos.highest_price = current_price
+
+            # ============================
+            # TRAILING ATR
+            # ============================
+
+            if atr:
+
+                trailing_distance = (
+                    atr *
+                    settings.TRAILING_STOP_ATR_MULT
+                )
+
+            else:
+
+                trailing_distance = (
+                    current_price *
+                    settings.TRAILING_STOP_PERCENT
+                )
+
+            new_sl = (
+                current_price -
+                trailing_distance
+            )
+
+            change_pct = (
+                (
+                    current_price /
+                    (pos.last_sl_update_price or pos.buy_price)
+                ) - 1
+            ) * 100
+
+            # ============================
+            # MOVER STOP SOLO HACIA ARRIBA
+            # ============================
+
+            if (
+                new_sl > pos.stop_loss and
+                change_pct > 0.1
+            ):
+
+                pos.stop_loss = new_sl
+
+                pos.last_sl_update_price = current_price
+
+                persistence_manager.enqueue_position_update(
+                    pos.id,
+                    {
+                        "stop_loss": new_sl,
+                        "highest_price": current_price,
+                        "last_sl_update_price": current_price
+                    }
+                )
+
+            else:
+
+                persistence_manager.enqueue_position_update(
+                    pos.id,
+                    {
+                        "highest_price": current_price
+                    }
+                )
+
+        # ============================
+        # SOLO TRAILING STOP
+        # ============================
+
         exit_reason = None
+
         if current_price <= pos.stop_loss:
-            exit_reason = "TRAILING_STOP" if current_price > pos.buy_price else "STOP_LOSS"
-        elif current_price >= pos.take_profit:
-            exit_reason = "TAKE_PROFIT"
+
+            if current_price > pos.buy_price:
+                exit_reason = "TRAILING_STOP"
+            else:
+                exit_reason = "STOP_LOSS"
+
+        # ============================
+        # TIEMPO MÍNIMO
+        # ============================
 
         if exit_reason:
-            # ⛔ Bloquear salida si no han pasado 30 segundos
+
             if seconds_in_trade < 30:
-                # Logueamos pero no salimos (a menos que sea una caída catastrófica > 10% del SL)
-                if current_price > pos.stop_loss * 0.9: 
-                    logger.debug(f"Ignorando salida prematura para {symbol} ({seconds_in_trade:.1f}s en trade)")
+
+                if current_price > pos.stop_loss * 0.9:
+
+                    logger.debug(
+                        f"Ignorando salida prematura "
+                        f"para {symbol} "
+                        f"({seconds_in_trade:.1f}s)"
+                    )
+
                     return
+
                 else:
                     exit_reason += "_CRITICAL"
 
             if getattr(pos, "closing", False):
                 return
-            pos.closing = True # Marcar como cerrando INMEDIATAMENTE para evitar duplicados en la cola
 
-            logger.info(f"🚀 SELL TRIGGER ({exit_reason}) -> Symbol: {symbol} | Price: {current_price} | SL: {pos.stop_loss:.6f} | TP: {pos.take_profit:.6f} | Time: {seconds_in_trade:.1f}s")
+            pos.closing = True
+
+            logger.info(
+                f"🚀 SELL TRIGGER ({exit_reason}) -> "
+                f"{symbol} | "
+                f"Price: {current_price:.6f} | "
+                f"SL: {pos.stop_loss:.6f} | "
+                f"HIGH: {pos.highest_price:.6f} | "
+                f"Time: {seconds_in_trade:.1f}s"
+            )
+
             try:
-                self.exit_queue.put_nowait((pos, current_price, exit_reason))
+
+                self.exit_queue.put_nowait(
+                    (
+                        pos,
+                        current_price,
+                        exit_reason
+                    )
+                )
+
             except asyncio.QueueFull:
-                logger.error(f"Falla crítica: Cola de salidas llena para {symbol}. Ejecutando salida directa.")
-                await self.execute_exit(pos, current_price, exit_reason)
+
+                logger.error(
+                    f"Cola de salidas llena "
+                    f"para {symbol}"
+                )
+
+                await self.execute_exit(
+                    pos,
+                    current_price,
+                    exit_reason
+                )
 
     async def execute_exit(self, pos: Position, expected_price: float, reason: str):
         symbol = pos.symbol
