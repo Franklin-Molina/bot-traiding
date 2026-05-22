@@ -136,7 +136,8 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                         mid_price = (float(data['b']) + float(data['a'])) / 2
                         if symbol in price_buffers:
                             price_buffers[symbol].add(mid_price, high=float(data['a']), low=float(data['b']))
-                        continue
+                        # Sin continue — el finally llama task_done() correctamente
+                        # batch queda vacío, el for tick in batch no ejecuta nada
 
                 for tick in batch:
                     try:
@@ -170,7 +171,8 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                         # A. Monitorear salidas
                         current_atr = None
                         if symbol in price_buffers:
-                            indicators = price_buffers[symbol].get_indicators(update_atr=False)
+                            update_atr = (price_buffers[symbol]._tick_count % 10 == 0)
+                            indicators = price_buffers[symbol].get_indicators(update_atr=update_atr)
                             current_atr = indicators.get('atr_14')
                         
                         await executor.monitor_and_exit(symbol, current_price, atr=current_atr)
@@ -195,7 +197,8 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                 logger.debug(f"Ignorando entrada {symbol} (Sistema PAUSADO)")
                             else:
                                 candidate = active_candidates[symbol]['data']
-                                indicators = price_buffers[symbol].get_indicators(update_atr=True)
+                                update_atr = (price_buffers[symbol]._tick_count % 10 == 0)
+                                indicators = price_buffers[symbol].get_indicators(update_atr=update_atr)
                                 
                                 if indicators['atr_14'] is None:
                                     continue

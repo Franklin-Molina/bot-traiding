@@ -13,7 +13,7 @@ class BinanceWS:
         self.base_url = "wss://stream.binance.com:9443/stream"
         self.market_queue = market_queue
         
-        initial_streams = streams or ["!miniTicker@arr"]
+        initial_streams = streams or []
         self.streams = set()
         for s in initial_streams:
             if s.startswith("!"):
@@ -53,8 +53,10 @@ class BinanceWS:
         while self.is_running:
             try:
                 if not self.streams:
-                    self.streams.add("!miniTicker@arr")
-
+                    logger.info("Sin streams activos. Esperando candidatos...")
+                    await asyncio.sleep(2)
+                    continue
+                    
                 stream_url = f"{self.base_url}?streams={'/'.join(self.streams)}"
                 logger.info(f"Conectando a Binance WebSocket (Multiplex): {stream_url}")
 
