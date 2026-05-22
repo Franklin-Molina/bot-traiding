@@ -72,6 +72,21 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
             while not strategy_queue.empty():
                 new_candidate = strategy_queue.get_nowait()
                 symbol = new_candidate["symbol"]
+                MAX_TRACKED_CANDIDATES = 3
+                if len(active_candidates) >= MAX_TRACKED_CANDIDATES:
+                    # Si ya estamos siguiendo 3 monedas, ignoramos las nuevas
+                    # a menos que tengan un Score IA excepcionalmente alto (ej. > 90)
+                    # y reemplazamos a la peor.
+                    lowest_score_sym = min(active_candidates, key=lambda k: active_candidates[k]['data']['score'])
+                    if new_candidate['score'] > active_candidates[lowest_score_sym]['data']['score']:
+                        logger.info(f"Reemplazando candidato {lowest_score_sym} por {symbol} (Mejor Score)")
+                        del active_candidates[lowest_score_sym]
+                        # Idealmente, aquí deberías desuscribirte del WebSocket viejo
+                        # await ws_client.unsubscribe([f"{lowest_score_sym.lower()}@bookTicker"])
+                    else:
+                        strategy_queue.task_done()
+                        continue # Ignoramos este candidato
+
                 active_candidates[symbol] = {
                     "data": new_candidate,
                     "created_at": time.time()
@@ -210,23 +225,21 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                 momentum_ok = False
                                 momentum = 0
                                 
-                                # Usamos un Lookback dinámico. Queremos comparar el precio actual
-                                # con el precio de hace ~20-50 ticks para ver tendencia real, no ruido.
-                                lookback_period = min(len(prices_list) - 1, 50) 
-                                
-                                if lookback_period >= 10: # Requerimos al menos 10 ticks de historial
-                                    # Momentum = % de cambio desde el precio histórico
-                                    historical_price = prices_list[-(lookback_period + 1)]
-                                    momentum = (prices_list[-1] - historical_price) / historical_price
+                                # Simulamos velocidad por ticks (Asumiendo ~2-3 ticks por segundo)
+                                # Miramos los últimos ~3 segundos (unos 10 ticks de profundidad)
+                                if len(prices_list) >= 10:
+                                    price_now = prices_list[-1]
+                                    price_3s_ago = prices_list[-10]
                                     
-                                    # Reducimos la exigencia de 0.1% a 0.05% (es scalping)
-                                    if momentum > 0.0005: 
-                                        entry_score += 20
+                                    # Velocidad = % de cambio en esa micro-ventana
+                                    momentum = (price_now - price_3s_ago) / price_3s_ago
+                                    
+                                    # NUEVA REGLA: Exigimos solo un 0.10% de aceleración
+                                    if momentum > 0.0010: 
+                                        entry_score += 30
                                         
-                                        # Confirmación de Micro-Tendencia: El precio actual
-                                        # debe ser mayor a una Media Móvil Simple de los últimos 5 ticks
-                                        short_sma = sum(prices_list[-5:]) / 5
-                                        if prices_list[-1] > short_sma:
+                                        # Confirmación de micro-tendencia: ¿Está subiendo escalonadamente?
+                                        if prices_list[-1] > prices_list[-3] > prices_list[-6]:
                                             entry_score += 20
                                             momentum_ok = True
 
