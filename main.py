@@ -52,7 +52,7 @@ async def main():
     logger.info("✅ Slots inicializados")
 
     # 3. Colas desacopladas
-    market_queue = asyncio.Queue(maxsize=1000)
+    market_queue = asyncio.Queue(maxsize=settings.MARKET_QUEUE_MAXSIZE)
     strategy_queue = asyncio.Queue(maxsize=50)
 
     # 4. Exchange Interface para Reconciliación

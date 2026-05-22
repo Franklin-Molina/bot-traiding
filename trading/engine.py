@@ -52,6 +52,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
     price_buffers = {} # symbol: PriceBuffer
     book_tickers = {} # symbol: {'bid': float, 'ask': float, 'last_update': float}
     last_analysis = {} # symbol: timestamp
+    last_logged_score = {} # symbol: score
     
     cleanup_interval = 60
     last_cleanup = time.time()
@@ -69,221 +70,243 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
 
         # 1. Revisar si hay nuevos candidatos del Motor Macro
         try:
+            new_candidates_batch = []
             while not strategy_queue.empty():
-                new_candidate = strategy_queue.get_nowait()
-                symbol = new_candidate["symbol"]
-                MAX_TRACKED_CANDIDATES = 3
-                if len(active_candidates) >= MAX_TRACKED_CANDIDATES:
-                    # Si ya estamos siguiendo 3 monedas, ignoramos las nuevas
-                    # a menos que tengan un Score IA excepcionalmente alto (ej. > 90)
-                    # y reemplazamos a la peor.
-                    lowest_score_sym = min(active_candidates, key=lambda k: active_candidates[k]['data']['score'])
-                    if new_candidate['score'] > active_candidates[lowest_score_sym]['data']['score']:
-                        logger.info(f"Reemplazando candidato {lowest_score_sym} por {symbol} (Mejor Score)")
-                        del active_candidates[lowest_score_sym]
-                        # Idealmente, aquí deberías desuscribirte del WebSocket viejo
-                        # await ws_client.unsubscribe([f"{lowest_score_sym.lower()}@bookTicker"])
-                    else:
-                        strategy_queue.task_done()
-                        continue # Ignoramos este candidato
-
-                active_candidates[symbol] = {
-                    "data": new_candidate,
-                    "created_at": time.time()
-                }
-                logger.info(f"Recibido candidato táctico: {symbol} (Score: {new_candidate['score']})")
-                await ws_client.subscribe([f"{symbol.lower()}@bookTicker"])
+                new_candidates_batch.append(strategy_queue.get_nowait())
                 strategy_queue.task_done()
-        except asyncio.QueueEmpty:
-            pass
+                
+            if new_candidates_batch:
+                MAX_TRACKED_CANDIDATES = 3
+                streams_to_subscribe = []
+                streams_to_unsubscribe = []
+                
+                for new_candidate in new_candidates_batch:
+                    symbol = new_candidate["symbol"]
+                    
+                    if symbol in active_candidates:
+                        active_candidates[symbol]['data']['score'] = new_candidate['score']
+                        continue
 
-        # 1.1 Limpieza de candidatos y tickers obsoletos (TTL)
+                    if len(active_candidates) >= MAX_TRACKED_CANDIDATES:
+                        lowest_score_sym = min(active_candidates, key=lambda k: active_candidates[k]['data']['score'])
+                        if new_candidate['score'] > active_candidates[lowest_score_sym]['data']['score']:
+                            logger.info(f"Reemplazando {lowest_score_sym} por {symbol} (Mejor Score: {new_candidate['score']})")
+                            del active_candidates[lowest_score_sym]
+                            streams_to_unsubscribe.extend([
+                                f"{lowest_score_sym.lower()}@trade",
+                                f"{lowest_score_sym.lower()}@bookTicker"
+                            ])
+                            
+                            active_candidates[symbol] = {
+                                "data": new_candidate,
+                                "created_at": time.time()
+                            }
+                            await executor.prepare_symbol(symbol)
+                            streams_to_subscribe.extend([
+                                f"{symbol.lower()}@trade",
+                                f"{symbol.lower()}@bookTicker"
+                            ])
+                    else:
+                        active_candidates[symbol] = {
+                            "data": new_candidate,
+                            "created_at": time.time()
+                        }
+                        logger.info(f"Recibido candidato táctico: {symbol} (Score: {new_candidate['score']})")
+                        await executor.prepare_symbol(symbol)
+                        streams_to_subscribe.extend([
+                            f"{symbol.lower()}@trade",
+                            f"{symbol.lower()}@bookTicker"
+                        ])
+                
+                if streams_to_subscribe:
+                    await ws_client.subscribe(streams_to_subscribe)
+                    
+        except Exception as e:
+            logger.error(f"Error procesando cola de estrategias: {e}")
+
+        # 1.1 Limpieza
         now = time.time()
         if now - last_cleanup > cleanup_interval:
             last_cleanup = now
-            # Limpiar candidatos > 5 minutos
             expired_candidates = [s for s, c in active_candidates.items() if now - c['created_at'] > 300]
             for s in expired_candidates:
                 del active_candidates[s]
-                if s not in executor.active_positions and s not in executor.pending_orders:
-                    # Opcionalmente desuscribir si no es posición activa
-                    pass
             
-            # Limpiar book_tickers > 1 minuto
             expired_tickers = [s for s, t in book_tickers.items() if now - t.get('last_update', 0) > 60]
             for s in expired_tickers:
                 if s not in active_candidates and s not in executor.active_positions:
                     del book_tickers[s]
             
-            # Limpiar buffers de símbolos que ya no estamos siguiendo
             current_symbols = set(active_candidates.keys()) | set(executor.active_positions.keys()) | executor.pending_orders
             expired_buffers = [s for s in price_buffers if s not in current_symbols]
             for s in expired_buffers:
                 del price_buffers[s]
 
-        # 2. Procesar datos de mercado
+        # 2. Procesar datos de mercado (Snapshot Architecture)
         try:
-            # 🚀 Backpressure: Si la cola está muy llena, vaciamos para procesar solo lo último
+            # --- Batch Processing & Backpressure ---
             q_size = market_queue.qsize()
-            if q_size > 500:
-                logger.warning(f"Cola de mercado saturada ({q_size}). Purgando para reducir lag...")
-                while market_queue.qsize() > 50:
-                    try:
-                        market_queue.get_nowait()
-                        market_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-
-            data = await asyncio.wait_for(market_queue.get(), timeout=0.1)
+            max_q = market_queue.maxsize or 1000
             
-            try:
-                batch = []
-                if isinstance(data, list): # miniTicker@arr
-                    batch = data
-                elif isinstance(data, dict): # bookTicker individual
-                    if data.get('u') or 'b' in data: # Es un bookTicker
-                        symbol = data['s']
-                        book_tickers[symbol] = {
-                            'bid': float(data['b']),
-                            'ask': float(data['a']),
-                            'last_update': time.time()
-                        }
-                        mid_price = (float(data['b']) + float(data['a'])) / 2
-                        if symbol in price_buffers:
-                            price_buffers[symbol].add(mid_price, high=float(data['a']), low=float(data['b']))
-                        # Sin continue — el finally llama task_done() correctamente
-                        # batch queda vacío, el for tick in batch no ejecuta nada
-
-                for tick in batch:
+            messages = []
+            if q_size > 0:
+                # Si hay saturación (>80%), drenamos agresivamente
+                drain_limit = 50 if q_size < max_q * 0.8 else 200
+                for _ in range(min(q_size, drain_limit)):
                     try:
-                        symbol = tick['s']
+                        messages.append(market_queue.get_nowait())
+                    except asyncio.QueueEmpty: break
+            else:
+                # Si no hay datos, esperamos uno
+                try:
+                    messages.append(await asyncio.wait_for(market_queue.get(), timeout=0.5))
+                except asyncio.TimeoutError: continue
+
+            # --- Normalización y Actualización de Caché ---
+            batch_ticks = []
+            for msg in messages:
+                if isinstance(msg, list): # miniTicker@arr (Macro)
+                    batch_ticks.extend(msg)
+                elif isinstance(msg, dict):
+                    event_type = msg.get('e')
+                    symbol = msg.get('s', '').upper()
+                    if not symbol: continue
+                    
+                    if event_type == 'trade':
+                        price = float(msg['p'])
+                        if symbol in price_buffers:
+                            price_buffers[symbol].add(price, timestamp=msg['E']/1000)
+                        batch_ticks.append(msg)
+                    elif 'b' in msg and 'a' in msg: # bookTicker
+                        book_tickers[symbol] = {
+                            'bid': float(msg['b']), 'ask': float(msg['a']), 'last_update': time.time()
+                        }
+                        # Generar pseudo-tick para mantener vivo el motor táctico
+                        batch_ticks.append({'s': symbol, 'p': msg['a'], 'e': 'bookTicker', 'E': int(time.time()*1000)})
+                    else:
+                        batch_ticks.append(msg)
+                
+                market_queue.task_done()
+
+            processed_in_cycle = set()
+            for tick in batch_ticks:
+                    try:
+                        symbol = tick.get('s', '').upper()
+                        if not symbol: continue
                         
-                        # 🛡️ Filtro de Relevancia (EVITAR PROCESAMIENTO INNECESARIO)
-                        is_relevant = (
-                            symbol in active_candidates or 
-                            symbol in executor.active_positions or 
-                            symbol in executor.pending_orders
-                        )
-                        
-                        if not is_relevant:
-                            continue
+                        is_relevant = (symbol in active_candidates or symbol in executor.active_positions or symbol in executor.pending_orders)
+                        if not is_relevant: continue
 
                         if not symbol.endswith("USDT") or any(bad in symbol for bad in ["TRY", "EUR", "IDR", "GBP", "DAI", "RUB"]):
                             continue
+                            
+                        # Throttling por símbolo en este ciclo de batch
+                        if symbol in processed_in_cycle: continue
+                        processed_in_cycle.add(symbol)
 
-                        current_price = float(tick['c'])
+                        current_price = float(tick.get('p', tick.get('c', 0)))
+                        if current_price == 0: continue
                         
+                        # Spread
+                        spread_pct = 0.0
+                        if symbol in book_tickers:
+                            spread_pct = (book_tickers[symbol]['ask'] / book_tickers[symbol]['bid']) - 1
+
                         if symbol not in price_buffers:
                             if symbol not in recovery.recovery_started:
                                 recovery.recovery_started.add(symbol)
-                                price_buffers[symbol] = PriceBuffer(maxlen=100)
+                                price_buffers[symbol] = PriceBuffer(maxlen=300)
                                 task = asyncio.create_task(recovery.recover_symbol(symbol, price_buffers[symbol]))
                                 system_state.task_registry.register(task, f"Recovery_{symbol}")
 
-                        if symbol in price_buffers:
-                            price_buffers[symbol].add(current_price)
+                        if symbol in price_buffers and tick.get('e') != 'trade':
+                             price_buffers[symbol].add(current_price)
 
                         # A. Monitorear salidas
                         current_atr = None
                         if symbol in price_buffers:
-                            update_atr = (price_buffers[symbol]._tick_count % 10 == 0)
-                            indicators = price_buffers[symbol].get_indicators(update_atr=update_atr)
+                            indicators = price_buffers[symbol].get_indicators()
                             current_atr = indicators.get('atr_14')
                         
-                        await executor.monitor_and_exit(symbol, current_price, atr=current_atr)
+                        executor.monitor_and_exit(symbol, current_price, atr=current_atr)
 
-                        if recovery.is_in_warmup(symbol):
-                            continue
+                        if recovery.is_in_warmup(symbol): continue
 
                         # B. Evaluar entrada
                         if symbol in active_candidates and symbol not in executor.active_positions:
-                            if symbol not in price_buffers:
-                                # Esto no debería ocurrir con el fix de recovery_started, pero somos defensivos
-                                logger.warning(f"Buffer faltante para candidato {symbol}. Reintentando recuperación...")
-                                recovery.recovery_started.discard(symbol)
-                                continue
-
                             now_ts = time.time()
-                            if now_ts - last_analysis.get(symbol, 0) < 5:
+                            if now_ts - last_analysis.get(symbol, 0) < settings.STRATEGY_EVAL_INTERVAL: 
                                 continue
                             last_analysis[symbol] = now_ts
 
-                            if system_state.is_paused:
-                                logger.debug(f"Ignorando entrada {symbol} (Sistema PAUSADO)")
-                            else:
-                                candidate = active_candidates[symbol]['data']
-                                update_atr = (price_buffers[symbol]._tick_count % 10 == 0)
-                                indicators = price_buffers[symbol].get_indicators(update_atr=update_atr)
+                            if system_state.is_paused: continue
+
+                            candidate = active_candidates[symbol]['data']
+                            indicators = price_buffers[symbol].get_indicators()
+                            if indicators['atr_14'] is None: continue
+
+                            atr_rel = indicators['atr_14'] / current_price
+                            entry_score = 0
+                            momentum_ok = False
+                            
+                            # 1. Micro-Momentum Real (Ventana Temporal 1s)
+                            price_1s_ago = price_buffers[symbol].get_price_ago(1.0)
+                            momentum = 0.0
+                            if price_1s_ago:
+                                momentum = (current_price - price_1s_ago) / price_1s_ago
                                 
-                                if indicators['atr_14'] is None:
+                                # Filtro HFT Real: > 0.15% de movimiento real en 1s (Anti-Ruido)
+                                if momentum > 0.0015:
+                                    entry_score += 30
+                                    
+                                    # 2. Expansión de Rango Local (Volatility Breakout ajustado)
+                                    # Desplazamiento local de precio sin requerir bombas explosivas
+                                    local_range, _ = price_buffers[symbol].get_local_range(3.0)
+                                    if local_range > 0.0010: # 0.10% min expansion
+                                        entry_score += 20
+                                        momentum_ok = True
+                                        logger.success(f"🔥 MOMENTUM REAL {symbol} | Mom={momentum:.4%} | Range={local_range:.4%}")
+
+                            # 3. Spread (Estricto)
+                            spread_ok = False
+                            if symbol in book_tickers:
+                                if spread_pct <= settings.MAX_SPREAD_PERCENT:
+                                    entry_score += 30
+                                    spread_ok = True
+                                    current_price = book_tickers[symbol]['ask']
+                                else:
+                                    logger.warning(f"❌ SPREAD FAIL {symbol} | {spread_pct:.4%} > {settings.MAX_SPREAD_PERCENT:.4%}")
+
+                            # 4. ATR (Volatilidad Mínima)
+                            if atr_rel >= settings.MIN_ATR_RELATIVE:
+                                entry_score += 30
+
+                            # 5. Régimen de Volatilidad
+                            prices_list = list(price_buffers[symbol].prices)
+                            regime = TA.detect_volatility_regime(prices_list, indicators['atr_14'])
+                            if regime == "PANIC": entry_score -= 50
+                            elif regime == "EXPANSION": entry_score += 10
+
+                            # 6. Gestión de Candidatos Muertos (Pruning)
+                            if entry_score < 40 and not momentum_ok:
+                                if symbol in active_candidates:
+                                    logger.warning(f"🗑️ Expulsando {symbol} (Score insuficiente: {entry_score})")
+                                    active_candidates.pop(symbol, None)
+                                    last_logged_score.pop(symbol, None)
                                     continue
 
-                                atr_rel = indicators['atr_14'] / current_price
-                                entry_score = 0
-                                
-                                prices_list = list(price_buffers[symbol].prices)
-                                momentum_ok = False
-                                momentum = 0
-                                
-                                # Simulamos velocidad por ticks (Asumiendo ~2-3 ticks por segundo)
-                                # Miramos los últimos ~3 segundos (unos 10 ticks de profundidad)
-                                if len(prices_list) >= 10:
-                                    price_now = prices_list[-1]
-                                    price_3s_ago = prices_list[-10]
-                                    
-                                    # Velocidad = % de cambio en esa micro-ventana
-                                    momentum = (price_now - price_3s_ago) / price_3s_ago
-                                    
-                                    # NUEVA REGLA: Exigimos solo un 0.10% de aceleración
-                                    if momentum > 0.0010: 
-                                        entry_score += 30
-                                        
-                                        # Confirmación de micro-tendencia: ¿Está subiendo escalonadamente?
-                                        if prices_list[-1] > prices_list[-3] > prices_list[-6]:
-                                            entry_score += 20
-                                            momentum_ok = True
+                            # Logging Inteligente (Solo si cambia score significativamente)
+                            if entry_score != last_logged_score.get(symbol):
+                                logger.info(f"TACTICAL | {symbol} | Score={entry_score} | Mom={momentum:.5f} | RangeOK={momentum_ok} | SpreadOK={spread_ok}")
+                                last_logged_score[symbol] = entry_score
 
-                                spread_ok = False
-                                if symbol in book_tickers:
-                                    bt = book_tickers[symbol]
-                                    spread_pct = (bt['ask'] / bt['bid']) - 1
-                                    if spread_pct <= settings.MAX_SPREAD_PERCENT:
-                                        entry_score += 30
-                                        spread_ok = True
-                                        current_price = bt['ask']
+                            if entry_score >= 80 and momentum_ok and spread_ok:
+                                logger.success(f"🚀 GATILLO TÁCTICO: {symbol} Score: {entry_score} | Price: {current_price}")
+                                await executor.try_buy(symbol, current_price, candidate['score'], atr=indicators['atr_14'], timestamp=tick.get('E'), momentum=momentum)
+                                active_candidates.pop(symbol, None)
 
-                                if atr_rel >= settings.MIN_ATR_RELATIVE:
-                                    entry_score += 30
-
-                                regime = TA.detect_volatility_regime(prices_list, indicators['atr_14'])
-                                if regime == "PANIC":
-                                    entry_score -= 50
-                                elif regime == "EXPANSION":
-                                    entry_score += 10
-
-                                if entry_score >= 70 and momentum_ok and spread_ok:
-                                    anticipation_factor = 0.0005 if momentum > 0.002 else 0.0
-                                    adjusted_price = current_price * (1 - anticipation_factor)
-                                    
-                                    logger.success(f"🚀 GATILLO TÁCTICO: {symbol} Score: {entry_score} | Price: {current_price}")
-                                    
-                                    await executor.try_buy(
-                                        symbol, 
-                                        current_price, 
-                                        candidate['score'], 
-                                        atr=indicators['atr_14'],
-                                        timestamp=tick.get('E'),
-                                        momentum=momentum
-                                    )
-                                    active_candidates.pop(symbol, None)
-                                else:
-                                    if price_buffers[symbol]._tick_count % 50 == 0:
-                                        logger.debug(f"Analizando {symbol}: Score {entry_score}")
                     except Exception as e:
                         logger.exception(f"Error procesando tick para {tick.get('s', 'unknown')}: {e}")
-            finally:
-                market_queue.task_done()
-        except asyncio.TimeoutError:
-            continue
+        except asyncio.TimeoutError: continue
         except Exception as e:
             logger.error(f"Error crítico en loop de mercado: {e}")

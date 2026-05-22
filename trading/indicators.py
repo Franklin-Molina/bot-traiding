@@ -1,4 +1,5 @@
 import math
+import time
 from collections import deque
 from loguru import logger
 
@@ -103,10 +104,11 @@ class TA:
 
 class PriceBuffer:
     """
-    Buffer dinámico con soporte para indicadores incrementales.
+    Buffer dinámico con soporte para indicadores incrementales y ventanas temporales.
     """
     def __init__(self, maxlen: int = 100):
         self.prices = deque(maxlen=maxlen)
+        self.timestamps = deque(maxlen=maxlen)
         self.highs = deque(maxlen=maxlen)
         self.lows = deque(maxlen=maxlen)
         
@@ -118,9 +120,10 @@ class PriceBuffer:
         self._last_price = None
         self._tick_count = 0
 
-    def add(self, price: float, high: float = None, low: float = None):
+    def add(self, price: float, high: float = None, low: float = None, timestamp: float = None):
         h = high or price
         l = low or price
+        ts = timestamp or time.time()
         
         # 1. Actualización de EMA 20 (Incremental)
         if self._ema_20 is None:
@@ -138,8 +141,6 @@ class PriceBuffer:
             
             if self._avg_gain_14 is None:
                 if len(self.prices) >= 14: # Aproximación inicial tras tener suficientes datos
-                    # Esto se activará una sola vez cuando el buffer se llene
-                    # Para mayor precisión inicial, podríamos esperar a tener exactamente 14 diffs
                     pass 
             else:
                 self._avg_gain_14 = (self._avg_gain_14 * 13 + gain) / 14
@@ -156,6 +157,7 @@ class PriceBuffer:
 
         # Añadir a deques
         self.prices.append(price)
+        self.timestamps.append(ts)
         self.highs.append(h)
         self.lows.append(l)
         self._last_price = price
@@ -193,13 +195,60 @@ class PriceBuffer:
             tr_list.append(tr)
         self._atr_14 = sum(tr_list) / 14
 
+    def get_price_ago(self, seconds: float):
+        """
+        Retorna el precio aproximado de hace N segundos basado en timestamps.
+        Si no hay suficientes datos para cubrir la ventana completa, retorna None.
+        """
+        if not self.prices or not self.timestamps or len(self.prices) < 2:
+            return None
+        
+        now = self.timestamps[-1]
+        target_ts = now - seconds
+        
+        # Si el primer dato es más reciente que el target, no tenemos ventana suficiente
+        if self.timestamps[0] > target_ts:
+            return None
+
+        # Búsqueda reversa
+        for i in range(len(self.timestamps) - 1, -1, -1):
+            if self.timestamps[i] <= target_ts:
+                return self.prices[i]
+        
+        return None
+
+    def get_local_range(self, seconds: float):
+        """
+        Calcula la expansión de precio (High-Low) en una ventana de tiempo.
+        Retorna (range_pct, current_price)
+        """
+        if not self.prices or len(self.prices) < 2:
+            return 0.0, 0.0
+            
+        now = self.timestamps[-1]
+        target_ts = now - seconds
+        
+        subset = []
+        for i in range(len(self.timestamps) - 1, -1, -1):
+            if self.timestamps[i] >= target_ts:
+                subset.append(self.prices[i])
+            else:
+                break
+        
+        if not subset:
+            return 0.0, self.prices[-1]
+            
+        local_max = max(subset)
+        local_min = min(subset)
+        current = self.prices[-1]
+        
+        range_pct = (local_max - local_min) / local_min if local_min > 0 else 0
+        return range_pct, current
+
     def get_indicators(self, update_atr: bool = False):
         """
         Retorna indicadores precalculados incrementalmente.
-        `update_atr` se mantiene por compatibilidad de firma pero el cálculo es ahora incremental.
         """
-        # Si aún no tenemos los incrementales (warmup), usamos los métodos estáticos lentos
-        # Esto solo ocurre al principio
         if self._ema_20 is None or self._avg_gain_14 is None:
             return {
                 "ema_20": TA.calculate_ema(list(self.prices), 20),
@@ -207,8 +256,7 @@ class PriceBuffer:
                 "atr_14": TA.calculate_atr(list(self.highs), list(self.lows), list(self.prices), 14)
             }
         
-        # RSI dinámico
-        rsi = 100.0
+        rsi = 50.0
         if self._avg_loss_14 > 0:
             rs = self._avg_gain_14 / self._avg_loss_14
             rsi = 100 - (100 / (1 + rs))

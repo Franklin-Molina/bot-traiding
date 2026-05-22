@@ -33,6 +33,7 @@ class TradeExecutor:
         self.max_failures = 3
         self.exit_queue = asyncio.Queue(maxsize=100)
         self._exit_worker_task = None
+        self.symbol_cache = {}
 
     async def start(self):
         """Inicia trabajadores asíncronos del ejecutor."""
@@ -60,6 +61,17 @@ class TradeExecutor:
             except Exception as e:
                 logger.error(f"Error en ExitWorker: {e}")
                 await asyncio.sleep(1)
+
+    async def prepare_symbol(self, symbol: str):
+        """Pre-carga la información del símbolo para ejecuciones zero-network."""
+        if symbol not in self.symbol_cache:
+            try:
+                info = await self.exchange.get_symbol_info(symbol)
+                if info:
+                    self.symbol_cache[symbol] = info
+                    logger.info(f"✅ Symbol Info cacheado para {symbol}")
+            except Exception as e:
+                logger.error(f"Error cacheando info para {symbol}: {e}")
 
     async def load_active_positions(self):
         """Carga posiciones abiertas y órdenes pendientes de DB y valida balance REAL."""
@@ -130,288 +142,286 @@ class TradeExecutor:
         return f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
 
     # ============================
-# NUEVA LÓGICA MOMENTUM RIDING
-# SIN TAKE PROFIT FIJO
-# SOLO TRAILING DINÁMICO
-# ============================
+    # NUEVA LÓGICA MOMENTUM RIDING
+    # SIN TAKE PROFIT FIJO
+    # SOLO TRAILING DINÁMICO
+    # ============================
 
-async def try_buy(
-    self,
-    symbol: str,
-    price: float,
-    score: int,
-    atr: float = None,
-    timestamp: int = None,
-    momentum: float = 0
-):
-    start_perf = time.perf_counter()
+    async def try_buy(
+        self,
+        symbol: str,
+        price: float,
+        score: int,
+        atr: float = None,
+        timestamp: int = None,
+        momentum: float = 0
+    ):
+        start_perf = time.perf_counter()
 
-    # 🔴 Validación ATR
-    if atr is None or price <= 0:
-        logger.warning(f"Compra abortada para {symbol}: ATR o precio inválido")
-        return
-
-    atr_rel = atr / price
-
-    if atr_rel < settings.MIN_ATR_RELATIVE:
-        logger.warning(
-            f"Compra abortada para {symbol}: "
-            f"Volatilidad insuficiente ({atr_rel:.2%})"
-        )
-        return
-
-    # Cooldown
-    now = time.time()
-
-    if symbol in self.cooldowns:
-        if now < self.cooldowns[symbol]:
-            return
-        else:
-            del self.cooldowns[symbol]
-
-    if system_state.health not in [
-        HealthStatus.HEALTHY,
-        HealthStatus.RECOVERING
-    ]:
-        return
-
-    if symbol in self.pending_orders:
-        return
-
-    if symbol in self.active_positions:
-        return
-
-    used_slots = await SlotManager.get_used_slots()
-    total_slots = await SlotManager.get_total_slots()
-
-    logger.info(f"Slots activos: {used_slots} / {total_slots}")
-    logger.info(f"Active positions: {list(self.active_positions.keys())}")
-
-    slot = await SlotManager.get_available_slot()
-
-    if not slot:
-        logger.warning(f"Portfolio Risk: Sin slots disponibles para {symbol}")
-        return
-
-    logger.info(f"Intentando BUY {symbol} | Active: {len(self.active_positions)}")
-
-    self.pending_orders.add(symbol)
-
-    client_order_id = self._generate_client_id("buy")
-
-    try:
-
-        symbol_info = await asyncio.wait_for(
-            self.exchange.get_symbol_info(symbol),
-            timeout=5
-        )
-
-        if not symbol_info:
+        # 🔴 Validación ATR
+        if atr is None or price <= 0:
+            logger.warning(f"Compra abortada para {symbol}: ATR o precio inválido")
             return
 
-        quantity = self._calculate_quantity(
-            slot.assigned_capital,
-            price,
-            symbol_info
-        )
+        atr_rel = atr / price
 
-        if quantity <= 0:
-            return
-
-        if not self._validate_notional(quantity, price, symbol_info):
-            return
-
-        # Registrar orden
-        async with async_session() as session:
-
-            db_order = Order(
-                client_order_id=client_order_id,
-                symbol=symbol,
-                side="BUY",
-                status=OrderStatus.SUBMITTED,
-                price=price,
-                quantity=float(quantity)
+        if atr_rel < settings.MIN_ATR_RELATIVE:
+            logger.warning(
+                f"Compra abortada para {symbol}: "
+                f"Volatilidad insuficiente ({atr_rel:.2%})"
             )
+            return
 
-            session.add(db_order)
+        # Cooldown
+        now = time.time()
 
-            await session.commit()
+        if symbol in self.cooldowns:
+            if now < self.cooldowns[symbol]:
+                return
+            else:
+                del self.cooldowns[symbol]
 
-            await event_logger.log_event(
-                "ORDER_SUBMITTED",
-                symbol,
-                {
-                    "cid": client_order_id,
-                    "price": price
-                }
-            )
+        if system_state.health not in [
+            HealthStatus.HEALTHY,
+            HealthStatus.RECOVERING
+        ]:
+            return
 
-        # ============================
-        # STOP LOSS DINÁMICO ATR
-        # ============================
+        if symbol in self.pending_orders:
+            return
 
-        sl_dist = atr * 2.5
+        if symbol in self.active_positions:
+            return
 
-        min_sl_dist = price * 0.005
-        max_sl_dist = price * 0.05
+        used_slots = await SlotManager.get_used_slots()
+        total_slots = await SlotManager.get_total_slots()
 
-        sl_dist = max(
-            min(sl_dist, max_sl_dist),
-            min_sl_dist
-        )
+        logger.info(f"Slots activos: {used_slots} / {total_slots}")
+        logger.info(f"Active positions: {list(self.active_positions.keys())}")
 
-        stop_loss = price - sl_dist
+        slot = await SlotManager.get_available_slot()
 
-        await SlotManager.lock_slot(slot.id)
+        if not slot:
+            logger.warning(f"Portfolio Risk: Sin slots disponibles para {symbol}")
+            return
 
-        # ============================
-        # SNIPER BUY
-        # ============================
+        logger.info(f"Intentando BUY {symbol} | Active: {len(self.active_positions)}")
 
-        order_resp = await asyncio.wait_for(
-            self.exchange.execute_sniper_buy(
-                symbol,
+        self.pending_orders.add(symbol)
+
+        client_order_id = self._generate_client_id("buy")
+
+        try:
+
+            symbol_info = self.symbol_cache.get(symbol)
+
+            if not symbol_info:
+                logger.warning(f"Symbol info no cacheado para {symbol}, abortando try_buy.")
+                return
+
+            quantity = self._calculate_quantity(
                 slot.assigned_capital,
                 price,
-                slippage_tolerance=0.001,
-                client_order_id=client_order_id
-            ),
-            timeout=10
-        )
-
-        if order_resp:
-
-            fill_price = float(order_resp.get('price', price))
-
-            if (
-                'cummulativeQuoteQty' in order_resp and
-                float(order_resp['executedQty']) > 0
-            ):
-                fill_price = (
-                    float(order_resp['cummulativeQuoteQty']) /
-                    float(order_resp['executedQty'])
-                )
-
-            slippage = ((fill_price / price) - 1) * 100
-
-            latency = (
-                (time.perf_counter() - start_perf) * 1000
+                symbol_info
             )
 
-            if slippage > (
-                settings.MAX_SLIPPAGE_PERCENT * 100
-            ):
-                logger.warning(
-                    f"⚠️ ALTO SLIPPAGE DETECTADO: "
-                    f"{symbol} @ {slippage:.2f}%"
+            if quantity <= 0:
+                return
+
+            if not self._validate_notional(quantity, price, symbol_info):
+                return
+
+            # Registrar orden
+            async with async_session() as session:
+
+                db_order = Order(
+                    client_order_id=client_order_id,
+                    symbol=symbol,
+                    side="BUY",
+                    status=OrderStatus.SUBMITTED,
+                    price=price,
+                    quantity=float(quantity)
+                )
+
+                session.add(db_order)
+
+                await session.commit()
+
+                await event_logger.log_event(
+                    "ORDER_SUBMITTED",
+                    symbol,
+                    {
+                        "cid": client_order_id,
+                        "price": price
+                    }
                 )
 
             # ============================
-            # CREAR POSICIÓN
-            # SIN TAKE PROFIT
+            # STOP LOSS DINÁMICO ATR
             # ============================
 
-            async with async_session() as session:
+            sl_dist = atr * 2.5
 
-                from sqlalchemy import update
+            min_sl_dist = price * 0.005
+            max_sl_dist = price * 0.05
 
-                await session.execute(
-                    update(Order)
-                    .where(Order.client_order_id == client_order_id)
-                    .values(
-                        status=OrderStatus.FILLED,
-                        fill_price=fill_price,
-                        executed_quantity=float(
+            sl_dist = max(
+                min(sl_dist, max_sl_dist),
+                min_sl_dist
+            )
+
+            stop_loss = price - sl_dist
+
+            await SlotManager.lock_slot(slot.id)
+
+            # ============================
+            # SNIPER BUY
+            # ============================
+
+            order_resp = await asyncio.wait_for(
+                self.exchange.execute_sniper_buy(
+                    symbol,
+                    slot.assigned_capital,
+                    price,
+                    slippage_tolerance=0.001,
+                    client_order_id=client_order_id
+                ),
+                timeout=10
+            )
+
+            if order_resp:
+
+                fill_price = float(order_resp.get('price', price))
+
+                if (
+                    'cummulativeQuoteQty' in order_resp and
+                    float(order_resp['executedQty']) > 0
+                ):
+                    fill_price = (
+                        float(order_resp['cummulativeQuoteQty']) /
+                        float(order_resp['executedQty'])
+                    )
+
+                slippage = ((fill_price / price) - 1) * 100
+
+                latency = (
+                    (time.perf_counter() - start_perf) * 1000
+                )
+
+                if slippage > (
+                    settings.MAX_SLIPPAGE_PERCENT * 100
+                ):
+                    logger.warning(
+                        f"⚠️ ALTO SLIPPAGE DETECTADO: "
+                        f"{symbol} @ {slippage:.2f}%"
+                    )
+
+                # ============================
+                # CREAR POSICIÓN
+                # SIN TAKE PROFIT
+                # ============================
+
+                async with async_session() as session:
+
+                    from sqlalchemy import update
+
+                    await session.execute(
+                        update(Order)
+                        .where(Order.client_order_id == client_order_id)
+                        .values(
+                            status=OrderStatus.FILLED,
+                            fill_price=fill_price,
+                            executed_quantity=float(
+                                order_resp.get(
+                                    'executedQty',
+                                    quantity
+                                )
+                            ),
+                            exchange_order_id=str(
+                                order_resp.get('orderId')
+                            )
+                        )
+                    )
+
+                    new_pos = Position(
+                        symbol=symbol,
+                        buy_price=fill_price,
+                        quantity=float(
                             order_resp.get(
                                 'executedQty',
                                 quantity
                             )
                         ),
-                        exchange_order_id=str(
-                            order_resp.get('orderId')
-                        )
+                        slot_id=slot.id,
+
+                        # ============================
+                        # SOLO STOP LOSS
+                        # ============================
+
+                        stop_loss=stop_loss,
+
+                        # TP eliminado
+                        take_profit=None,
+
+                        highest_price=fill_price,
+                        last_sl_update_price=fill_price,
+
+                        status="OPEN"
                     )
+
+                    session.add(new_pos)
+
+                    await session.commit()
+
+                    await session.refresh(new_pos)
+
+                    self.active_positions[symbol] = new_pos
+
+                logger.success(
+                    f"COMPRA MOMENTUM FILLED: "
+                    f"{symbol} @ {fill_price:.6f} "
+                    f"(Slip: {slippage:.2f}%)"
                 )
 
-                new_pos = Position(
-                    symbol=symbol,
-                    buy_price=fill_price,
-                    quantity=float(
-                        order_resp.get(
-                            'executedQty',
-                            quantity
-                        )
-                    ),
-                    slot_id=slot.id,
-
-                    # ============================
-                    # SOLO STOP LOSS
-                    # ============================
-
-                    stop_loss=stop_loss,
-
-                    # TP eliminado
-                    take_profit=None,
-
-                    highest_price=fill_price,
-                    last_sl_update_price=fill_price,
-
-                    status="OPEN"
+                await event_logger.log_event(
+                    "POSITION_OPENED",
+                    symbol,
+                    {
+                        "price": fill_price,
+                        "slippage": slippage,
+                        "latency": latency,
+                        "momentum": momentum
+                    }
                 )
 
-                session.add(new_pos)
+                self._send_alert(
+                    f"🎯 MOMENTUM BUY: "
+                    f"{symbol} @ {fill_price:.6f}"
+                )
 
-                await session.commit()
+                self.failure_counter = 0
 
-                await session.refresh(new_pos)
+            else:
+                await self._handle_order_failure(
+                    client_order_id,
+                    symbol,
+                    slot.id
+                )
 
-                self.active_positions[symbol] = new_pos
+        except Exception as e:
 
-            logger.success(
-                f"COMPRA MOMENTUM FILLED: "
-                f"{symbol} @ {fill_price:.6f} "
-                f"(Slip: {slippage:.2f}%)"
+            logger.error(
+                f"Error crítico en try_buy {symbol}: {e}"
             )
 
-            await event_logger.log_event(
-                "POSITION_OPENED",
-                symbol,
-                {
-                    "price": fill_price,
-                    "slippage": slippage,
-                    "latency": latency,
-                    "momentum": momentum
-                }
-            )
-
-            self._send_alert(
-                f"🎯 MOMENTUM BUY: "
-                f"{symbol} @ {fill_price:.6f}"
-            )
-
-            self.failure_counter = 0
-
-        else:
             await self._handle_order_failure(
                 client_order_id,
                 symbol,
                 slot.id
             )
 
-    except Exception as e:
-
-        logger.error(
-            f"Error crítico en try_buy {symbol}: {e}"
-        )
-
-        await self._handle_order_failure(
-            client_order_id,
-            symbol,
-            slot.id
-        )
-
-    finally:
-        self.pending_orders.discard(symbol)
+        finally:
+            self.pending_orders.discard(symbol)
 
     async def _handle_order_failure(self, client_order_id: str, symbol: str, slot_id: int):
         self.failure_counter += 1
@@ -423,7 +433,7 @@ async def try_buy(
         if self.failure_counter >= self.max_failures:
             system_state.set_health(HealthStatus.DEGRADED)
 
-    async def monitor_and_exit(self, symbol: str, current_price: float, atr: float = None ):
+    def monitor_and_exit(self, symbol: str, current_price: float, atr: float = None ):
 
         if symbol not in self.active_positions:
             return
@@ -573,15 +583,14 @@ async def try_buy(
             except asyncio.QueueFull:
 
                 logger.error(
-                    f"Cola de salidas llena "
-                    f"para {symbol}"
+                    f"Cola de salidas llena para {symbol}, desviando a background task"
                 )
 
-                await self.execute_exit(
+                asyncio.create_task(self.execute_exit(
                     pos,
                     current_price,
                     exit_reason
-                )
+                ))
 
     async def execute_exit(self, pos: Position, expected_price: float, reason: str):
         symbol = pos.symbol

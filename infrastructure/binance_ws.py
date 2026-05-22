@@ -77,8 +77,8 @@ class BinanceWS:
                             if not self.is_running:
                                 break
                             self._last_msg_time = time.time()
-                            # Fire & Forget: ws.recv() nunca se bloquea
-                            asyncio.create_task(self._parse_and_route(message))
+                            # Procesamiento sincrónico directo para evitar saturación de asyncio
+                            self._parse_and_route_sync(message)
 
                     except websockets.exceptions.ConnectionClosed as e:
                         logger.warning(f"Conexión cerrada por el servidor: {e}")
@@ -93,7 +93,7 @@ class BinanceWS:
                 await asyncio.sleep(sleep_time)
                 self._reconnect_delay *= 1.5
 
-    async def _parse_and_route(self, message):
+    def _parse_and_route_sync(self, message):
         """
         Parsea el mensaje JSON y lo enruta a la cola de mercado.
         Versión activa con backpressure extremo (purga al 90%).
@@ -121,10 +121,10 @@ class BinanceWS:
             event_time = data.get('E', 0)
 
         if event_time > 0:
-            lag = now - event_time
+            lag = max(0, now - event_time)
             self.total_lag += lag
             self.msg_count += 1
-            if self.msg_count % 100 == 0:
+            if self.msg_count % 500 == 0: # Reducir spam de métricas
                 avg_lag = self.total_lag / self.msg_count
                 elapsed = time.time() - self.start_time
                 tps = self.msg_count / elapsed if elapsed > 0 else 0
@@ -135,12 +135,12 @@ class BinanceWS:
 
         # --- Backpressure ---
         q_size = self.market_queue.qsize()
-        max_q = self.market_queue.maxsize
+        max_q = self.market_queue.maxsize or 1000
 
-        # Nivel crítico (>90%): purga la mitad de la cola
-        if max_q > 0 and q_size > max_q * 0.9:
-            logger.warning(f"⚠️ PURGA DE EMERGENCIA: Cola WS al {q_size}. Tirando datos viejos.")
-            for _ in range(int(q_size * 0.5)):
+        # Nivel crítico (>95%): purga agresiva
+        if q_size > max_q * 0.95:
+            logger.warning(f"⚠️ PURGA CRÍTICA WS ({q_size}/{max_q}).")
+            for _ in range(int(max_q * 0.2)): # Tirar solo 20%
                 try:
                     self.market_queue.get_nowait()
                     self.market_queue.task_done()

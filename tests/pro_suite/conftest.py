@@ -1,9 +1,7 @@
 import asyncio
 from core.config import settings
 # Forzar modo simulación antes de importar infraestructura
-settings.SIMULATION_MODE = True
-
-
+settings.SIMULATION_MODE = False
 
 import pytest
 import pytest_asyncio
