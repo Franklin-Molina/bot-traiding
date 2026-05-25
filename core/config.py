@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     USDT_PER_SLOT: float = 6.5          # Capital por operación en USDT
     RISK_PER_TRADE: float = 0.025        # 2.5% del capital total como riesgo máximo por trade
     MIN_ATR_RELATIVE: float = 0.0020     # Volatilidad mínima (0.20%+)
-    MAX_SPREAD_PERCENT: float = 0.0005   # Spread máximo aceptable (0.05%)
+    MAX_SPREAD_PERCENT: float = 0.0004   # Spread máximo aceptable (0.04%) - Endurecido para evitar Whipsaws
     MAX_SLIPPAGE_PERCENT: float = 0.005  # Slippage máximo aceptable (0.50%)
     MAX_PRICE_AGE_MS: int = 500          # Precio válido máximo 0.5 segundos (HFT-lite)
     STRATEGY_EVAL_INTERVAL: float = 0.25  # Evaluar estrategia máximo cada 250ms

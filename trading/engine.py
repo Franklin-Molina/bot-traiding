@@ -272,13 +272,13 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             if price_1s_ago:
                                 momentum = (current_price - price_1s_ago) / price_1s_ago
                                 
-                                # Filtro HFT Relajado: > 0.05% de movimiento en 3s
-                                if momentum > 0.0005:
+                                # Filtro Táctico ENDURECIDO: > 0.08% de movimiento fuerte y seco en 3s
+                                if momentum > 0.0008:
                                     entry_score += 30
                                     
                                     # 2. Expansión de Rango Local (Volatility Breakout ajustado)
                                     local_range, _ = price_buffers[symbol].get_local_range(3.0)
-                                    if local_range > 0.0005: # 0.05% min expansion
+                                    if local_range > 0.0006: # 0.06% min expansion (endurecido)
                                         entry_score += 20
                                         momentum_ok = True
                                         logger.success(f"🔥 MOMENTUM REAL {symbol} | Mom={momentum:.4%} | Range={local_range:.4%}")
