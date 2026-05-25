@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     MAX_PRICE_AGE_MS: int = 500          # Precio válido máximo 0.5 segundos (HFT-lite)
     STRATEGY_EVAL_INTERVAL: float = 0.25  # Evaluar estrategia máximo cada 250ms
     MARKET_QUEUE_MAXSIZE: int = 1000
+    MACRO_SCAN_INTERVAL_MINUTES: int = 5  # Intervalo de escaneo del Motor Macro (minutos)
     
     # Trailing Stop: se usa ATR si hay datos suficientes, porcentaje como fallback
     TRAILING_STOP_ATR_MULT: float = 3.5  # Multiplicador ATR para trailing stop dinámico (aumentado)

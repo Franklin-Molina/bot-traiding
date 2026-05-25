@@ -6,11 +6,11 @@ from infrastructure.binance_rest import BinanceRest
 from ai.orchestrator import AIOrchestrator
 
 class MacroEngine:
-    def __init__(self, candidates_queue: asyncio.Queue):
+    def __init__(self, candidates_queue: asyncio.Queue, alert_queue: asyncio.Queue):
         self.candidates_queue = candidates_queue
+        self.alert_queue = alert_queue
         self.binance = BinanceRest()
         self.ai = AIOrchestrator()
-
     async def run_cycle(self):
         """
         Ejecuta el ciclo macro: escaneo -> filtrado -> IA.
@@ -21,7 +21,22 @@ class MacroEngine:
                 await asyncio.sleep(60)
                 continue
 
-            logger.info("Iniciando ciclo Macro de escaneo...")
+            # --- HEALTHCHECK IA (Evaluación periódica por ciclo) ---
+            is_ai_healthy = await self.ai.test_connection()
+            if not is_ai_healthy:
+                if system_state.ai_enabled: # Solo alertar si acabamos de perderla
+                    logger.critical("⚠️ FALLO CRÍTICO IA - Activando Fallback Técnico")
+                    system_state.ai_enabled = False
+                    try:
+                        await self.alert_queue.put("⚠️ **Alerta del Sistema**\nFallo o Rate Limit con OpenRouter IA.\n\n🔄 **Cambiando a modo SÓLO TÉCNICO (Fallback).**")
+                    except Exception as e:
+                        pass
+            else:
+                if not system_state.ai_enabled:
+                    logger.success("✅ IA Recuperada - Desactivando Fallback Técnico")
+                system_state.ai_enabled = True
+
+            logger.info(f"Iniciando ciclo Macro de escaneo... (IA Activada: {system_state.ai_enabled})")
             try:
                 # 1. Obtener todos los tickers de 24h
                 tickers = await self.binance.get_24hr_tickers()
@@ -51,17 +66,36 @@ class MacroEngine:
                 candidates = sorted(candidates, key=lambda x: x['change'] * x['volume'], reverse=True)[:5]
 
                 for c in candidates:
-                    score = await self.ai.analyze_asset(c['symbol'], context=c)
-                    if score > 70:
-                        logger.success(f"¡Joyita encontrada! {c['symbol']} con score IA: {score}")
+                    if system_state.ai_enabled:
+                        score = await self.ai.analyze_asset(c['symbol'], context=c)
+                        
+                        if score == -1:
+                            logger.warning(f"⚠️ Rate Limit alcanzado durante ciclo. Cambiando {c['symbol']} y el resto a Fallback Técnico.")
+                            system_state.ai_enabled = False
+                            score = 85
+                            await self.candidates_queue.put({"symbol": c['symbol'], "score": score})
+                            await asyncio.sleep(1.0)
+                            continue
+
+                        if score > 70:
+                            logger.success(f"¡Joyita encontrada! {c['symbol']} con score IA: {score}")
+                            await self.candidates_queue.put({"symbol": c['symbol'], "score": score})
+                        
+                        # 🚨 LA SOLUCIÓN ANTI-BANEO:
+                        # Esperar 5 segundos entre cada llamada para respetar el tier gratuito
+                        await asyncio.sleep(5.0)
+                    else:
+                        # FALLBACK PURAMENTE TÉCNICO
+                        # Si no hay IA, usamos un score técnico simulado basado en el momentum
+                        # Para que el motor táctico lo reciba y lo opere si cumple spreads y ATR
+                        score = 85 # Score base para que pase al táctico (debe ser > 70)
+                        logger.warning(f"Fallback Técnico: Enviando {c['symbol']} a motor táctico sin validación IA.")
                         await self.candidates_queue.put({"symbol": c['symbol'], "score": score})
-                    
-                    # 🚨 LA SOLUCIÓN ANTI-BANEO:
-                    # Esperar 5 segundos entre cada llamada para respetar el tier gratuito
-                    await asyncio.sleep(5.0)
+                        
+                        await asyncio.sleep(1.0) # Evitar procesar todo de golpe
                 
             except Exception as e:
                 logger.error(f"Error en ciclo Macro: {e}")
             
-            # Intervalo de 15 min definido en README
-            await asyncio.sleep(15 * 60)
+            # Intervalo dinámico según configuración global
+            await asyncio.sleep(settings.MACRO_SCAN_INTERVAL_MINUTES * 60)

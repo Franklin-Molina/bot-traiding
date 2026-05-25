@@ -38,6 +38,7 @@ class SystemState:
         self._is_paused = False
         self._panic_mode = False
         self._health = HealthStatus.HEALTHY
+        self.ai_enabled = True
         self.task_registry = TaskRegistry()
         self.daily_pnl = 0.0
         self.max_daily_loss_pct = -5.0

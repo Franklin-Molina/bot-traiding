@@ -460,23 +460,22 @@ class TradeExecutor:
             # ============================
 
             if atr:
-
-                trailing_distance = (
-                    atr *
-                    settings.TRAILING_STOP_ATR_MULT
-                )
-
+                trailing_distance = atr * settings.TRAILING_STOP_ATR_MULT
             else:
+                trailing_distance = current_price * settings.TRAILING_STOP_PERCENT
 
-                trailing_distance = (
-                    current_price *
-                    settings.TRAILING_STOP_PERCENT
-                )
-
-            new_sl = (
-                current_price -
-                trailing_distance
+            # ============================
+            # FIX: CLAMP TRAILING DISTANCE
+            # ============================
+            min_sl_dist = current_price * 0.008  # Mismo límite mínimo de 0.8% que en la compra
+            max_sl_dist = current_price * 0.05
+            
+            trailing_distance = max(
+                min(trailing_distance, max_sl_dist),
+                min_sl_dist
             )
+
+            new_sl = current_price - trailing_distance
 
             change_pct = (
                 (

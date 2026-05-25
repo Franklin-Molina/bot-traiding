@@ -61,7 +61,7 @@ async def main():
         await exchange.sync_time()
 
     # 5. Motores
-    macro_engine = MacroEngine(strategy_queue)
+    macro_engine = MacroEngine(strategy_queue, alert_queue)
     recon_engine = ReconciliationEngine(exchange, interval=60) # Cada 1 min
 
     tasks = [
