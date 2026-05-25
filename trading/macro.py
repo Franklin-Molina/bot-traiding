@@ -36,8 +36,8 @@ class MacroEngine:
                         change = float(t['priceChangePercent'])
                         volume = float(t['quoteVolume'])
                         
-                        # Filtro de Liquidez: Mínimo 2M USDT de volumen en 24h
-                        if change >= settings.MIN_MOVEMENT_PERCENT and volume > 2_000_000:
+                        # Filtro Estricto de Liquidez para APIs gratuitas: Mínimo 10M USDT y 2% de movimiento
+                        if change >= 2.0 and volume > 10_000_000:
                             candidates.append({
                                 "symbol": symbol,
                                 "change": change,
@@ -55,6 +55,10 @@ class MacroEngine:
                     if score > 70:
                         logger.success(f"¡Joyita encontrada! {c['symbol']} con score IA: {score}")
                         await self.candidates_queue.put({"symbol": c['symbol'], "score": score})
+                    
+                    # 🚨 LA SOLUCIÓN ANTI-BANEO:
+                    # Esperar 5 segundos entre cada llamada para respetar el tier gratuito
+                    await asyncio.sleep(5.0)
                 
             except Exception as e:
                 logger.error(f"Error en ciclo Macro: {e}")

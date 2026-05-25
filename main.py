@@ -17,7 +17,7 @@ from trading.slots import SlotManager
 shutdown_event = asyncio.Event()
 
 async def main():
-    logger.info("🚀 Iniciando Arquitectura Maestro V2.0 PRO")
+    logger.info("🚀 Iniciando Arquitectura Maestro PRO")
 
     alert_queue = asyncio.Queue(maxsize=100)
 

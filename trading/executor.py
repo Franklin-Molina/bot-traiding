@@ -29,6 +29,7 @@ class TradeExecutor:
         self.active_positions = {} # symbol: Position
         self.pending_orders = set() # symbol
         self.cooldowns = {} # symbol: end_timestamp
+        self.stop_loss_counts = {} # symbol: count
         self.failure_counter = 0 
         self.max_failures = 3
         self.exit_queue = asyncio.Queue(maxsize=100)
@@ -158,19 +159,12 @@ class TradeExecutor:
     ):
         start_perf = time.perf_counter()
 
-        # 🔴 Validación ATR
-        if atr is None or price <= 0:
-            logger.warning(f"Compra abortada para {symbol}: ATR o precio inválido")
+        # 🔴 Validación Básica
+        if price <= 0:
+            logger.warning(f"Compra abortada para {symbol}: precio inválido")
             return
 
-        atr_rel = atr / price
-
-        if atr_rel < settings.MIN_ATR_RELATIVE:
-            logger.warning(
-                f"Compra abortada para {symbol}: "
-                f"Volatilidad insuficiente ({atr_rel:.2%})"
-            )
-            return
+        atr_rel = (atr / price) if atr else 0.0
 
         # Cooldown
         now = time.time()
@@ -260,9 +254,9 @@ class TradeExecutor:
             # STOP LOSS DINÁMICO ATR
             # ============================
 
-            sl_dist = atr * 2.5
+            sl_dist = atr * settings.TRAILING_STOP_ATR_MULT if atr else price * settings.TRAILING_STOP_PERCENT
 
-            min_sl_dist = price * 0.005
+            min_sl_dist = price * 0.008  # SL mínimo de 0.8% para evitar salidas muy tempranas
             max_sl_dist = price * 0.05
 
             sl_dist = max(
@@ -672,8 +666,16 @@ class TradeExecutor:
                 self.exchange.execute_limit_ioc_sell(symbol, price, quantity, client_order_id=client_id),
                 timeout=10
             )
-            if not order_resp:
-                logger.warning(f"LIMIT IOC falló para {symbol}. Reintentando con MARKET.")
+            
+            executed_qty = float(order_resp.get('executedQty', 0)) if order_resp else 0
+            is_expired = order_resp and order_resp.get('status') in ['EXPIRED', 'REJECTED']
+            
+            if not order_resp or (is_expired and executed_qty == 0):
+                if order_resp and order_resp.get("status") == "INSUFFICIENT_BALANCE":
+                    return order_resp
+                    
+                status_msg = order_resp.get('status') if order_resp else 'None'
+                logger.warning(f"LIMIT IOC falló/expiró para {symbol} (Status: {status_msg}). Reintentando con MARKET.")
                 order_resp = await asyncio.wait_for(
                     self.exchange.execute_market_sell(symbol, quantity, client_order_id=client_id),
                     timeout=10
@@ -710,9 +712,18 @@ class TradeExecutor:
             system_state.set_paused(True)
             self._send_alert(f"🛑 CIRCUIT BREAKER: Sistema pausado por pérdida diaria de {system_state.daily_pnl:.2f}%")
 
-        # Aplicar Cooldown de 15 minutos (900s) al cerrar posición
-        self.cooldowns[pos.symbol] = time.time() + 900
-        logger.info(f"Cooldown de 15min activado para {pos.symbol}")
+        # Aplicar Cooldown de 15 minutos (900s) por defecto
+        cooldown_time = 900
+        
+        if reason == "STOP_LOSS":
+            self.stop_loss_counts[pos.symbol] = self.stop_loss_counts.get(pos.symbol, 0) + 1
+            if self.stop_loss_counts[pos.symbol] >= 2:
+                logger.warning(f"🚫 BLACKLIST ACTIVADO: {pos.symbol} tocó STOP_LOSS 2 veces. Bloqueado por 1 hora.")
+                cooldown_time = 3600
+                self.stop_loss_counts[pos.symbol] = 0 # Reset para la próxima
+        
+        self.cooldowns[pos.symbol] = time.time() + cooldown_time
+        logger.info(f"Cooldown de {cooldown_time//60}min activado para {pos.symbol}")
 
         async with async_session() as session:
             history = TradeHistory(

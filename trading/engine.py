@@ -42,11 +42,28 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
     Mantiene la lista de candidatos activos y monitorea sus ticks.
     """
     logger.info("Procesador de estrategias activo.")
+    from infrastructure.binance_rest import BinanceRest
     executor = TradeExecutor(alert_queue)
     recovery = RecoveryEngine()
+    binance_rest = BinanceRest()
     
     await executor.start()
     await executor.load_active_positions()
+    
+    async def check_macro_trend(sym: str, current_p: float) -> bool:
+        try:
+            klines = await binance_rest.get_klines(sym, '15m', limit=20)
+            if not klines or len(klines) < 10:
+                return True
+            closes = [float(k[4]) for k in klines]
+            closes[-1] = current_p # Update last unclosed candle
+            ema9 = TA.calculate_ema(closes, 9)
+            if ema9 is None:
+                return True
+            return current_p > ema9
+        except Exception as e:
+            logger.error(f"Error en macro trend check para {sym}: {e}")
+            return True
     
     active_candidates = {} # symbol: {"data": dict, "created_at": float}
     price_buffers = {} # symbol: PriceBuffer
@@ -249,20 +266,19 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             entry_score = 0
                             momentum_ok = False
                             
-                            # 1. Micro-Momentum Real (Ventana Temporal 1s)
-                            price_1s_ago = price_buffers[symbol].get_price_ago(1.0)
+                            # 1. Micro-Momentum Real (Ventana Temporal 3s)
+                            price_1s_ago = price_buffers[symbol].get_price_ago(3.0)
                             momentum = 0.0
                             if price_1s_ago:
                                 momentum = (current_price - price_1s_ago) / price_1s_ago
                                 
-                                # Filtro HFT Real: > 0.15% de movimiento real en 1s (Anti-Ruido)
-                                if momentum > 0.0015:
+                                # Filtro HFT Relajado: > 0.05% de movimiento en 3s
+                                if momentum > 0.0005:
                                     entry_score += 30
                                     
                                     # 2. Expansión de Rango Local (Volatility Breakout ajustado)
-                                    # Desplazamiento local de precio sin requerir bombas explosivas
                                     local_range, _ = price_buffers[symbol].get_local_range(3.0)
-                                    if local_range > 0.0010: # 0.10% min expansion
+                                    if local_range > 0.0005: # 0.05% min expansion
                                         entry_score += 20
                                         momentum_ok = True
                                         logger.success(f"🔥 MOMENTUM REAL {symbol} | Mom={momentum:.4%} | Range={local_range:.4%}")
@@ -288,7 +304,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             elif regime == "EXPANSION": entry_score += 10
 
                             # 6. Gestión de Candidatos Muertos (Pruning)
-                            if entry_score < 40 and not momentum_ok:
+                            if entry_score < 20 and not momentum_ok:
                                 if symbol in active_candidates:
                                     logger.warning(f"🗑️ Expulsando {symbol} (Score insuficiente: {entry_score})")
                                     active_candidates.pop(symbol, None)
@@ -301,6 +317,14 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                 last_logged_score[symbol] = entry_score
 
                             if entry_score >= 80 and momentum_ok and spread_ok:
+                                # Validación Macro (Filtro 15m)
+                                macro_ok = await check_macro_trend(symbol, current_price)
+                                if not macro_ok:
+                                    logger.warning(f"🚫 COMPRA RECHAZADA por Tendencia Macro (15m bajista): {symbol}")
+                                    # Aplicar delay para no spamear la API
+                                    last_analysis[symbol] = now_ts + 60 
+                                    continue
+
                                 logger.success(f"🚀 GATILLO TÁCTICO: {symbol} Score: {entry_score} | Price: {current_price}")
                                 await executor.try_buy(symbol, current_price, candidate['score'], atr=indicators['atr_14'], timestamp=tick.get('E'), momentum=momentum)
                                 active_candidates.pop(symbol, None)

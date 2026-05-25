@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     MIN_MOVEMENT_PERCENT: float = 0.010     # 0.5% — más realista para entradas frecuentes
     MAX_ACTIVE_SLOTS: int = 3             # Slots reservados simultáneamente
     MAX_OPEN_POSITIONS: int = 3           # Posiciones ejecutadas simultáneamente
-    USDT_PER_SLOT: float = 5.5           # Capital por operación en USDT
+    USDT_PER_SLOT: float = 6.5          # Capital por operación en USDT
     RISK_PER_TRADE: float = 0.025        # 2.5% del capital total como riesgo máximo por trade
     MIN_ATR_RELATIVE: float = 0.0020     # Volatilidad mínima (0.20%+)
     MAX_SPREAD_PERCENT: float = 0.0005   # Spread máximo aceptable (0.05%)
@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     MARKET_QUEUE_MAXSIZE: int = 1000
     
     # Trailing Stop: se usa ATR si hay datos suficientes, porcentaje como fallback
-    TRAILING_STOP_ATR_MULT: float = 2.5  # Multiplicador ATR para trailing stop dinámico
-    TRAILING_STOP_PERCENT: float = 0.005 # 0.5% trailing stop fijo (fallback sin ATR)
+    TRAILING_STOP_ATR_MULT: float = 3.5  # Multiplicador ATR para trailing stop dinámico (aumentado)
+    TRAILING_STOP_PERCENT: float = 0.012 # 1.2% trailing stop fijo (fallback sin ATR)
     
     
     # Database
