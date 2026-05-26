@@ -516,6 +516,23 @@ class TradeExecutor:
                 )
 
         # ============================
+        # BREAKEVEN MECHANISM
+        # ============================
+        if current_price >= pos.buy_price * (1 + settings.BREAKEVEN_TRIGGER_PERCENT):
+            breakeven_sl = pos.buy_price * (1 + settings.BREAKEVEN_PROFIT_PERCENT)
+            if breakeven_sl > pos.stop_loss:
+                pos.stop_loss = breakeven_sl
+                pos.last_sl_update_price = current_price
+                logger.info(f"🛡️ BREAKEVEN ACTIVADO para {symbol}: SL movido a {breakeven_sl:.6f}")
+                persistence_manager.enqueue_position_update(
+                    pos.id,
+                    {
+                        "stop_loss": breakeven_sl,
+                        "last_sl_update_price": current_price
+                    }
+                )
+
+        # ============================
         # SOLO TRAILING STOP
         # ============================
 
@@ -529,25 +546,10 @@ class TradeExecutor:
                 exit_reason = "STOP_LOSS"
 
         # ============================
-        # TIEMPO MÍNIMO
+        # EJECUCIÓN DE SALIDA
         # ============================
 
         if exit_reason:
-
-            if seconds_in_trade < 30:
-
-                if current_price > pos.stop_loss * 0.9:
-
-                    logger.debug(
-                        f"Ignorando salida prematura "
-                        f"para {symbol} "
-                        f"({seconds_in_trade:.1f}s)"
-                    )
-
-                    return
-
-                else:
-                    exit_reason += "_CRITICAL"
 
             if getattr(pos, "closing", False):
                 return
@@ -662,7 +664,7 @@ class TradeExecutor:
     async def _send_sell_order(self, symbol: str, price: float, quantity: float, client_id: str) -> dict:
         try:
             order_resp = await asyncio.wait_for(
-                self.exchange.execute_limit_ioc_sell(symbol, price, quantity, client_order_id=client_id),
+                self.exchange.execute_limit_ioc_sell(symbol, price, quantity, client_order_id=client_id, slippage_tolerance=settings.MAX_SLIPPAGE_PERCENT),
                 timeout=10
             )
             

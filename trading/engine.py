@@ -266,18 +266,18 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             entry_score = 0
                             momentum_ok = False
                             
-                            # 1. Micro-Momentum Real (Ventana Temporal 3s)
-                            price_1s_ago = price_buffers[symbol].get_price_ago(3.0)
+                            # 1. Micro-Momentum Real (Ventana Temporal 15s)
+                            price_1s_ago = price_buffers[symbol].get_price_ago(15.0)
                             momentum = 0.0
                             if price_1s_ago:
                                 momentum = (current_price - price_1s_ago) / price_1s_ago
                                 
-                                # Filtro Táctico ENDURECIDO: > 0.08% de movimiento fuerte y seco en 3s
+                                # Filtro Táctico ENDURECIDO: > 0.08% de movimiento fuerte y seco en 15s
                                 if momentum > 0.0008:
                                     entry_score += 30
                                     
                                     # 2. Expansión de Rango Local (Volatility Breakout ajustado)
-                                    local_range, _ = price_buffers[symbol].get_local_range(3.0)
+                                    local_range, _ = price_buffers[symbol].get_local_range(15.0)
                                     if local_range > 0.0006: # 0.06% min expansion (endurecido)
                                         entry_score += 20
                                         momentum_ok = True

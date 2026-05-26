@@ -33,7 +33,11 @@ class Settings(BaseSettings):
     TRAILING_STOP_ATR_MULT: float = 3.5  # Multiplicador ATR para trailing stop dinámico (aumentado)
     TRAILING_STOP_PERCENT: float = 0.012 # 1.2% trailing stop fijo (fallback sin ATR)
     
+    # Breakeven Mechanism
+    BREAKEVEN_TRIGGER_PERCENT: float = 0.008  # 0.8% trigger para asegurar breakeven
+    BREAKEVEN_PROFIT_PERCENT: float = 0.002   # Asegurar al menos +0.2% cuando se activa breakeven
     
+
     # Database
     DB_DSN: str = "postgresql://user:pass@localhost:5432/trading_db"
     

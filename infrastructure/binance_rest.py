@@ -184,7 +184,7 @@ class BinanceRest(ExchangeInterface):
             logger.error(f"Error en compra MARKET ({symbol}): {e}")
             return None
 
-    async def execute_limit_ioc_sell(self, symbol: str, price: float, quantity: float = None, client_order_id: str = None):
+    async def execute_limit_ioc_sell(self, symbol: str, price: float, quantity: float = None, client_order_id: str = None, slippage_tolerance: float = 0.002):
         await self._acquire_token(weight=1)
         loop = asyncio.get_event_loop()
         try:
@@ -197,10 +197,13 @@ class BinanceRest(ExchangeInterface):
 
             step_size = 1.0
             min_qty = 0.0
+            tick_size = 0.0001
             for f in symbol_info['filters']:
                 if f['filterType'] == 'LOT_SIZE':
                     step_size = float(f['stepSize'])
                     min_qty = float(f['minQty'])
+                if f['filterType'] == 'PRICE_FILTER':
+                    tick_size = float(f['tickSize'])
 
             qty_to_sell = balance if quantity is None else min(quantity, balance)
             import math
@@ -209,13 +212,16 @@ class BinanceRest(ExchangeInterface):
             if qty_to_sell < min_qty:
                 return {"status": "INSUFFICIENT_BALANCE", "qty": qty_to_sell}
 
+            min_price = price * (1 - slippage_tolerance)
+            min_price = math.floor(min_price / tick_size) * tick_size
+
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
                 'type': 'LIMIT',
                 'timeInForce': 'IOC',
                 'quantity': float(f"{qty_to_sell:.8f}"),
-                'price': float(f"{price:.8f}"),
+                'price': float(f"{min_price:.8f}"),
                 'recvWindow': 10000,
                 'timestamp': int(time.time() * 1000 + self._time_offset)
             }
