@@ -112,6 +112,10 @@ class PriceBuffer:
         self.highs = deque(maxlen=maxlen)
         self.lows = deque(maxlen=maxlen)
         
+        # Para Z-Score de anomalías (1 hora = 240 ventanas de 15s)
+        self.momentums_15s = deque(maxlen=240)
+        self.last_momentum_calc_ts = 0.0
+        
         # Estados para indicadores incrementales
         self._ema_20 = None
         self._avg_gain_14 = None
@@ -244,6 +248,30 @@ class PriceBuffer:
         
         range_pct = (local_max - local_min) / local_min if local_min > 0 else 0
         return range_pct, current
+
+    def get_momentum_zscore(self, current_momentum: float, current_ts: float) -> float:
+        """
+        Calcula el Z-Score del momentum actual comparado con el histórico reciente (última hora).
+        Retorna None si no hay suficientes datos para una desviación estándar válida.
+        """
+        # Añadir al histórico solo cada 15 segundos para evitar solapamiento excesivo
+        if current_ts - self.last_momentum_calc_ts >= 15.0:
+            self.momentums_15s.append(current_momentum)
+            self.last_momentum_calc_ts = current_ts
+
+        # Necesitamos al menos 10 muestras (2.5 minutos) para que el Z-Score tenga algo de sentido
+        if len(self.momentums_15s) < 10:
+            return None
+            
+        mean_mom = sum(self.momentums_15s) / len(self.momentums_15s)
+        variance = sum((x - mean_mom) ** 2 for x in self.momentums_15s) / len(self.momentums_15s)
+        std_dev = variance ** 0.5
+        
+        if std_dev == 0:
+            return 0.0
+            
+        z_score = (current_momentum - mean_mom) / std_dev
+        return z_score
 
     def get_indicators(self, update_atr: bool = False):
         """

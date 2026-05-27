@@ -155,7 +155,8 @@ class TradeExecutor:
         score: int,
         atr: float = None,
         timestamp: int = None,
-        momentum: float = 0
+        momentum: float = 0,
+        ml_features: dict = None
     ):
         start_perf = time.perf_counter()
 
@@ -370,6 +371,29 @@ class TradeExecutor:
                     await session.refresh(new_pos)
 
                     self.active_positions[symbol] = new_pos
+                    
+                    # ============================
+                    # DATA LAKE: T0 (Features)
+                    # ============================
+                    if ml_features:
+                        from models.trading import MLTrainingData
+                        ai_raw = ml_features.get("ai_raw", {})
+                        ml_data = MLTrainingData(
+                            trade_id=str(new_pos.id),
+                            symbol=symbol,
+                            market_regime=ml_features.get("market_regime"),
+                            tech_score=ml_features.get("tech_score"),
+                            spread=ml_features.get("spread"),
+                            momentum_15s=ml_features.get("momentum_15s"),
+                            local_range_15s=ml_features.get("local_range_15s"),
+                            ai_risk=ai_raw.get("risk", 0.0),
+                            ai_manipulation=ai_raw.get("manipulation", 0.0),
+                            ai_news=ai_raw.get("news_strength", 0.0),
+                            ai_momentum=ai_raw.get("momentum", 0.0),
+                            ai_confidence=ai_raw.get("confidence", 0.0)
+                        )
+                        session.add(ml_data)
+                        await session.commit()
 
                 logger.success(
                     f"COMPRA MOMENTUM FILLED: "
@@ -740,6 +764,26 @@ class TradeExecutor:
                 latency_ms=latency
             )
             session.add(history)
+            
+            # ============================
+            # DATA LAKE: T1 (Target)
+            # ============================
+            from models.trading import MLTrainingData
+            from sqlalchemy import update
+            from datetime import datetime, UTC
+            
+            is_winner = 1 if pnl_pct > 0.5 else 0
+            
+            await session.execute(
+                update(MLTrainingData)
+                .where(MLTrainingData.trade_id == str(pos.id))
+                .values(
+                    profit_pct=pnl_pct,
+                    is_winner=is_winner,
+                    exit_time=datetime.now(UTC)
+                )
+            )
+
             await session.delete(await session.merge(pos))
             await session.commit()
             

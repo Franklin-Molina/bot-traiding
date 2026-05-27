@@ -42,6 +42,7 @@ class SystemState:
         self.task_registry = TaskRegistry()
         self.daily_pnl = 0.0
         self.max_daily_loss_pct = -5.0
+        self.invalidated_symbols = set()
 
     @property
     def is_running(self):
@@ -79,6 +80,13 @@ class SystemState:
         self._health = HealthStatus.HEALTHY
         self._panic_mode = False
         self._is_running = True
+
+    def invalidate_symbol_cache(self, symbol: str):
+        """
+        Marca un símbolo para que el Orquestador de IA invalide su caché 
+        debido a anomalías tácticas graves (Flash crash, pump, etc).
+        """
+        self.invalidated_symbols.add(symbol)
 
 # Instancia global
 system_state = SystemState()

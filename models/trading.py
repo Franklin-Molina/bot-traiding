@@ -225,3 +225,36 @@ class EventLog(Base):
         default=lambda: datetime.now(UTC),
         index=True
     )
+
+class MLTrainingData(Base):
+    """
+    Tabla de entrenamiento para el futuro modelo XGBoost.
+    Implementa el patrón T0-T1 para capturar features en la entrada
+    y el PnL final en la salida.
+    """
+    __tablename__ = "ml_training_data"
+
+    trade_id = Column(String, primary_key=True) # UUID o identificador único generado en T0
+
+    # Metadatos Temporales
+    entry_time = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+    exit_time = Column(DateTime(timezone=True), nullable=True)
+
+    # Features Base (T0)
+    symbol = Column(String, index=True)
+    market_regime = Column(String)
+    tech_score = Column(Float)
+    spread = Column(Float)
+    momentum_15s = Column(Float)
+    local_range_15s = Column(Float)
+
+    # Features IA (T0)
+    ai_risk = Column(Float)
+    ai_manipulation = Column(Float)
+    ai_news = Column(Float)
+    ai_momentum = Column(Float)
+    ai_confidence = Column(Float)
+
+    # Target (T1)
+    profit_pct = Column(Float, nullable=True)
+    is_winner = Column(Integer, nullable=True) # 1 o 0 para clasificación binaria XGBoost

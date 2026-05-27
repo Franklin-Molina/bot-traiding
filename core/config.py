@@ -16,18 +16,24 @@ class Settings(BaseSettings):
     # Trading Rules
    # Trading Rules
     MIN_TRADE_USD: float = 6.0            # Margen seguro sobre mínimo Binance ($5)
-    MIN_MOVEMENT_PERCENT: float = 0.010     # 0.5% — más realista para entradas frecuentes
-    MAX_ACTIVE_SLOTS: int = 3             # Slots reservados simultáneamente
-    MAX_OPEN_POSITIONS: int = 3           # Posiciones ejecutadas simultáneamente
-    USDT_PER_SLOT: float = 6.5          # Capital por operación en USDT
+    MIN_MOVEMENT_PERCENT: float = 0.0015     # 0.15% — empuje realista para momentum de corto plazo
+    MAX_ACTIVE_SLOTS: int = 2             # Slots reservados simultáneamente
+    MAX_OPEN_POSITIONS: int = 2           # Posiciones ejecutadas simultáneamente
+    USDT_PER_SLOT: float = 9.0          # Capital por operación en USDT
     RISK_PER_TRADE: float = 0.025        # 2.5% del capital total como riesgo máximo por trade
     MIN_ATR_RELATIVE: float = 0.0020     # Volatilidad mínima (0.20%+)
-    MAX_SPREAD_PERCENT: float = 0.0004   # Spread máximo aceptable (0.04%) - Endurecido para evitar Whipsaws
+    MAX_SPREAD_PERCENT: float = 0.0010   # Spread máximo aceptable (0.10%) - Flexibilidad para altcoins volátiles
     MAX_SLIPPAGE_PERCENT: float = 0.005  # Slippage máximo aceptable (0.50%)
-    MAX_PRICE_AGE_MS: int = 500          # Precio válido máximo 0.5 segundos (HFT-lite)
+    MAX_PRICE_AGE_MS: int = 1500         # Precio válido máximo 1.5 segundos (Tolerancia de latencia de red)
     STRATEGY_EVAL_INTERVAL: float = 0.25  # Evaluar estrategia máximo cada 250ms
     MARKET_QUEUE_MAXSIZE: int = 1000
     MACRO_SCAN_INTERVAL_MINUTES: int = 5  # Intervalo de escaneo del Motor Macro (minutos)
+    
+    # AI & Macro Advanced Filtering
+    AI_CACHE_TTL_MINUTES: int = 10
+    COOLDOWN_SPREAD_MINUTES: int = 10
+    COOLDOWN_AI_REJECT_MINUTES: int = 30
+    MIN_TECHNICAL_SCORE_AI: int = 65
     
     # Trailing Stop: se usa ATR si hay datos suficientes, porcentaje como fallback
     TRAILING_STOP_ATR_MULT: float = 3.5  # Multiplicador ATR para trailing stop dinámico (aumentado)

@@ -5,7 +5,7 @@ from core.config import settings
 from core.state import system_state
 from infrastructure.binance_rest import BinanceRest
 from infrastructure.database import async_session
-from models.trading import Position, TradeHistory, Slot, SlotStatus
+from models.trading import Position, TradeHistory, Slot, SlotStatus, MLTrainingData
 from sqlalchemy import select, func
 from trading.slots import SlotManager
 from ai.orchestrator import AIOrchestrator
@@ -44,6 +44,7 @@ async def cmd_help(message: types.Message):
         "/analyze {symbol} - Análisis instantáneo de un activo\n"
         "/signals - Ver señales actuales en cola\n"
         "/opportunities - Oportunidades detectadas por Macro\n"
+        "/ml_status - Estado del Data Lake (XGBoost)\n"
         "/mode - Ver modo actual (Simulación/Real)"
     )
     await message.answer(help_text, parse_mode="Markdown")
@@ -244,4 +245,31 @@ async def cmd_opportunities(message: types.Message):
     for t in top_gainers:
         text += f"• **{t['symbol']}**: {t['priceChangePercent']}% (Vol: {float(t['quoteVolume'])/1e6:.1f}M)\n"
     
+    await message.answer(text, parse_mode="Markdown")
+
+@router.message(Command("ml_status"))
+async def cmd_ml_status(message: types.Message):
+    async with async_session() as session:
+        # Contar total de filas (abiertas + cerradas)
+        total_ml_rows = await session.scalar(select(func.count(MLTrainingData.trade_id)))
+        
+        # Contar cerradas (exit_time is not null)
+        closed_count = await session.scalar(select(func.count(MLTrainingData.trade_id)).where(MLTrainingData.exit_time.isnot(None)))
+        
+        # Contar ganadoras
+        winners_count = await session.scalar(select(func.count(MLTrainingData.trade_id)).where(MLTrainingData.is_winner == 1))
+        
+        total_ml_rows = total_ml_rows or 0
+        closed_count = closed_count or 0
+        winners_count = winners_count or 0
+        losers_count = closed_count - winners_count
+        
+    text = (
+        f"🧠 **Estado del Data Lake (XGBoost)**\n\n"
+        f"📊 **Trades Registrados:** {total_ml_rows}\n"
+        f"🏁 **Trades Cerrados:** {closed_count}\n"
+        f"🏆 **Ganadores (>0.5%):** {winners_count}\n"
+        f"❌ **Perdedores/BE:** {losers_count}\n\n"
+        f"⏳ *El modelo requiere historial para iniciar la Fase 2.*"
+    )
     await message.answer(text, parse_mode="Markdown")

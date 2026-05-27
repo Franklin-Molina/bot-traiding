@@ -53,7 +53,6 @@ class BinanceWS:
         while self.is_running:
             try:
                 if not self.streams:
-                    logger.info("Sin streams activos. Esperando candidatos...")
                     await asyncio.sleep(2)
                     continue
                     

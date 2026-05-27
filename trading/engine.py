@@ -271,13 +271,24 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             momentum = 0.0
                             if price_1s_ago:
                                 momentum = (current_price - price_1s_ago) / price_1s_ago
+                                local_range, _ = price_buffers[symbol].get_local_range(15.0)
+                                
+                                # Calcular Z-Score
+                                z_score = price_buffers[symbol].get_momentum_zscore(momentum, current_ts=now_ts)
+                                
+                                # --- CORTACIRCUITOS DE ANOMALÍAS (Flash Crash/Pump) ---
+                                # Disparamos si Z-Score > 3.0 (3 sigmas) o si falla catastróficamente con el umbral fijo
+                                is_anomaly = (z_score is not None and abs(z_score) > 3.0) or abs(momentum) > 0.006 or local_range > 0.010
+                                
+                                if is_anomaly:
+                                    logger.warning(f"💥 ANOMALÍA DETECTADA {symbol} | Z-Score: {z_score} | Mom={momentum:.4%} | Range={local_range:.4%} | Disparando purga IA.")
+                                    system_state.invalidate_symbol_cache(symbol)
                                 
                                 # Filtro Táctico ENDURECIDO: > 0.08% de movimiento fuerte y seco en 15s
                                 if momentum > 0.0008:
                                     entry_score += 30
                                     
                                     # 2. Expansión de Rango Local (Volatility Breakout ajustado)
-                                    local_range, _ = price_buffers[symbol].get_local_range(15.0)
                                     if local_range > 0.0006: # 0.06% min expansion (endurecido)
                                         entry_score += 20
                                         momentum_ok = True
@@ -326,7 +337,17 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     continue
 
                                 logger.success(f"🚀 GATILLO TÁCTICO: {symbol} Score: {entry_score} | Price: {current_price}")
-                                await executor.try_buy(symbol, current_price, candidate['score'], atr=indicators['atr_14'], timestamp=tick.get('E'), momentum=momentum)
+                                
+                                ml_features = {
+                                    "market_regime": candidate.get("market_regime", "NORMAL"),
+                                    "tech_score": candidate.get("tech_score", 50),
+                                    "spread": spread_pct,
+                                    "momentum_15s": momentum,
+                                    "local_range_15s": local_range,
+                                    "ai_raw": candidate.get("ai_raw", {})
+                                }
+                                
+                                await executor.try_buy(symbol, current_price, candidate['score'], atr=indicators['atr_14'], timestamp=tick.get('E'), momentum=momentum, ml_features=ml_features)
                                 active_candidates.pop(symbol, None)
 
                     except Exception as e:

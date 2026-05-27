@@ -93,6 +93,16 @@ class BinanceRest(ExchangeInterface):
             logger.error(f"Error obteniendo tickers: {e}")
             return []
 
+    async def get_book_tickers(self):
+        """Obtiene el mejor Bid/Ask de todos los símbolos (weight 2)"""
+        await self._acquire_token(weight=2)
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, self.client.book_ticker)
+        except Exception as e:
+            logger.error(f"Error obteniendo book tickers: {e}")
+            return []
+
     async def get_symbol_info(self, symbol: str):
         if symbol in self._symbol_info_cache:
             return self._symbol_info_cache[symbol]
