@@ -7,6 +7,7 @@ from bot.main import start_bot
 from trading.engine import start_trading_engine
 from trading.macro import MacroEngine
 from trading.reconciliation import ReconciliationEngine
+from trading.outcome_tracker import OutcomeTracker
 from core.config import settings
 from infrastructure.database import init_db
 from infrastructure.event_logger import event_logger
@@ -63,12 +64,14 @@ async def main():
     # 5. Motores
     macro_engine = MacroEngine(strategy_queue, alert_queue)
     recon_engine = ReconciliationEngine(exchange, interval=60) # Cada 1 min
+    outcome_tracker = OutcomeTracker(interval_minutes=15, timeout_minutes=45)
 
     tasks = [
         asyncio.create_task(start_bot(alert_queue), name="telegram_bot"),
         asyncio.create_task(macro_engine.run_cycle(), name="macro_engine"),
         asyncio.create_task(start_trading_engine(market_queue, strategy_queue, alert_queue), name="trading_engine"),
-        asyncio.create_task(recon_engine.start(), name="recon_engine")
+        asyncio.create_task(recon_engine.start(), name="recon_engine"),
+        asyncio.create_task(outcome_tracker.start(), name="outcome_tracker")
     ]
 
     logger.info("✅ Componentes PRO iniciados")
@@ -97,6 +100,7 @@ async def main():
                 alert_queue.put_nowait("⚠️ **Bot Inactivo**")
             
         for t in tasks: t.cancel()
+        await outcome_tracker.stop()
         
         # Esperar a que las tareas terminen su cancelación
         if tasks:

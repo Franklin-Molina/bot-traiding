@@ -8,6 +8,7 @@ from trading.executor import TradeExecutor
 from trading.recovery import RecoveryEngine
 from trading.indicators import PriceBuffer, TA
 from trading.persistence import persistence_manager
+from ai.ml_inference import HybridInferenceEngine
 
 async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyncio.Queue, alert_queue: asyncio.Queue):
     """
@@ -16,6 +17,7 @@ async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyn
     logger.info("Iniciando Motor de Trading Táctico...")
     
     ws_client = BinanceWS(market_queue)
+    inference_engine = HybridInferenceEngine()
     
     # Iniciar Persistencia Batch
     await persistence_manager.start()
@@ -23,7 +25,7 @@ async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyn
     # Trabajadores desacoplados
     tasks = [
         asyncio.create_task(ws_client.connect()),
-        asyncio.create_task(strategy_processor(market_queue, strategy_queue, alert_queue, ws_client))
+        asyncio.create_task(strategy_processor(market_queue, strategy_queue, alert_queue, ws_client, inference_engine))
     ]
     
     try:
@@ -36,7 +38,7 @@ async def start_trading_engine(market_queue: asyncio.Queue, strategy_queue: asyn
         for t in tasks:
             t.cancel()
 
-async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asyncio.Queue, alert_queue: asyncio.Queue, ws_client: BinanceWS):
+async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asyncio.Queue, alert_queue: asyncio.Queue, ws_client: BinanceWS, inference_engine: HybridInferenceEngine):
     """
     Procesador de estrategias en tiempo real (Motor 2).
     Mantiene la lista de candidatos activos y monitorea sus ticks.
@@ -346,6 +348,45 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     "local_range_15s": local_range,
                                     "ai_raw": candidate.get("ai_raw", {})
                                 }
+                                
+                                # INFERENCIA HÍBRIDA (XGBoost)
+                                is_approved, prob_exito = inference_engine.predict_trade(ml_features)
+                                
+                                if not is_approved:
+                                    logger.warning(f"🚫 RECHAZO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%} < 40%")
+                                    
+                                    # Registrar Shadow Trade por Rechazo de ML
+                                    from sqlalchemy import update
+                                    from infrastructure.database import async_session
+                                    from models.trading import MLTrainingData
+                                    import uuid
+                                    
+                                    async with async_session() as session:
+                                        shadow = MLTrainingData(
+                                            trade_id=f"shadow_{uuid.uuid4().hex[:8]}",
+                                            trade_type="SHADOW",
+                                            status="PENDING",
+                                            reject_reason="Rechazo XGBoost",
+                                            entry_price=current_price,
+                                            symbol=symbol,
+                                            market_regime=ml_features["market_regime"],
+                                            tech_score=ml_features["tech_score"],
+                                            spread=spread_pct,
+                                            momentum_15s=momentum,
+                                            local_range_15s=local_range,
+                                            ai_risk=ml_features["ai_raw"].get("risk", 0.0),
+                                            ai_manipulation=ml_features["ai_raw"].get("manipulation", 0.0),
+                                            ai_news=ml_features["ai_raw"].get("news_strength", 0.0),
+                                            ai_momentum=ml_features["ai_raw"].get("momentum", 0.0),
+                                            ai_confidence=ml_features["ai_raw"].get("confidence", 0.0)
+                                        )
+                                        session.add(shadow)
+                                        await session.commit()
+                                        
+                                    active_candidates.pop(symbol, None)
+                                    continue
+                                    
+                                logger.success(f"✅ APROBADO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%}")
                                 
                                 await executor.try_buy(symbol, current_price, candidate['score'], atr=indicators['atr_14'], timestamp=tick.get('E'), momentum=momentum, ml_features=ml_features)
                                 active_candidates.pop(symbol, None)

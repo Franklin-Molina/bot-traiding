@@ -228,17 +228,22 @@ class EventLog(Base):
 
 class MLTrainingData(Base):
     """
-    Tabla de entrenamiento para el futuro modelo XGBoost.
-    Implementa el patrón T0-T1 para capturar features en la entrada
-    y el PnL final en la salida.
+    Tabla de entrenamiento Híbrida (Quant + AI).
+    Implementa Shadow Trades y Triple Barrier Labeling.
     """
     __tablename__ = "ml_training_data"
 
-    trade_id = Column(String, primary_key=True) # UUID o identificador único generado en T0
+    trade_id = Column(String, primary_key=True) # UUID
+    trade_type = Column(String, nullable=False, default="REAL") # REAL o SHADOW
+    status = Column(String, nullable=False, default="PENDING") # PENDING o CLOSED
+    reject_reason = Column(String, nullable=True) # Motivo si fue rechazado (para SHADOW)
 
     # Metadatos Temporales
     entry_time = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
     exit_time = Column(DateTime(timezone=True), nullable=True)
+    
+    # Precio de Entrada
+    entry_price = Column(Float, nullable=True)
 
     # Features Base (T0)
     symbol = Column(String, index=True)
@@ -249,12 +254,14 @@ class MLTrainingData(Base):
     local_range_15s = Column(Float)
 
     # Features IA (T0)
-    ai_risk = Column(Float)
-    ai_manipulation = Column(Float)
-    ai_news = Column(Float)
-    ai_momentum = Column(Float)
-    ai_confidence = Column(Float)
+    ai_risk = Column(Float, nullable=True)
+    ai_manipulation = Column(Float, nullable=True)
+    ai_news = Column(Float, nullable=True)
+    ai_momentum = Column(Float, nullable=True)
+    ai_confidence = Column(Float, nullable=True)
 
-    # Target (T1)
+    # Target & Excursions (T1)
     profit_pct = Column(Float, nullable=True)
-    is_winner = Column(Integer, nullable=True) # 1 o 0 para clasificación binaria XGBoost
+    mfe_pct = Column(Float, nullable=True) # Max Favorable Excursion
+    mae_pct = Column(Float, nullable=True) # Max Adverse Excursion
+    target_class = Column(Integer, nullable=True) # 0: Pérdida, 1: Break-even, 2: Bueno, 3: Excepcional

@@ -14,5 +14,7 @@ dependencies = [
     "pydantic-settings>=2.14.0",
     "redis>=7.4.0",
     "sqlalchemy>=2.0.49",
-    "websockets>=16.0",
+    "pandas>=2.2.0",
+    "scikit-learn>=1.4.0",
+    "xgboost>=2.0.0",
 ]

@@ -257,7 +257,7 @@ async def cmd_ml_status(message: types.Message):
         closed_count = await session.scalar(select(func.count(MLTrainingData.trade_id)).where(MLTrainingData.exit_time.isnot(None)))
         
         # Contar ganadoras
-        winners_count = await session.scalar(select(func.count(MLTrainingData.trade_id)).where(MLTrainingData.is_winner == 1))
+        winners_count = await session.scalar(select(func.count(MLTrainingData.trade_id)).where(MLTrainingData.target_class >= 2))
         
         total_ml_rows = total_ml_rows or 0
         closed_count = closed_count or 0

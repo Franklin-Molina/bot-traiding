@@ -6,6 +6,9 @@ from core.config import settings
 from core.state import system_state
 from infrastructure.binance_rest import BinanceRest
 from ai.orchestrator import AIOrchestrator
+import uuid
+from infrastructure.database import async_session
+from models.trading import MLTrainingData
 
 class MacroEngine:
     def __init__(self, candidates_queue: asyncio.Queue, alert_queue: asyncio.Queue):
@@ -18,6 +21,30 @@ class MacroEngine:
     def _clean_cooldowns(self):
         now = time.time()
         self.cooldowns = {k: v for k, v in self.cooldowns.items() if v["exp"] > now}
+
+    async def _record_shadow_trade(self, symbol: str, price: float, tech_score: float, market_regime: str, ai_raw: dict, reject_reason: str):
+        """Guarda un trade rechazado en la base de datos para Outcome Tracking (Triple Barrier)."""
+        try:
+            async with async_session() as session:
+                shadow = MLTrainingData(
+                    trade_id=f"shadow_{uuid.uuid4().hex[:8]}",
+                    trade_type="SHADOW",
+                    status="PENDING",
+                    reject_reason=reject_reason,
+                    entry_price=price,
+                    symbol=symbol,
+                    market_regime=market_regime,
+                    tech_score=tech_score,
+                    ai_risk=ai_raw.get("risk", 0.0),
+                    ai_manipulation=ai_raw.get("manipulation", 0.0),
+                    ai_news=ai_raw.get("news_strength", 0.0),
+                    ai_momentum=ai_raw.get("momentum", 0.0),
+                    ai_confidence=ai_raw.get("confidence", 0.0)
+                )
+                session.add(shadow)
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Error guardando SHADOW_TRADE para {symbol}: {e}")
 
     async def run_cycle(self):
         """
@@ -140,6 +167,7 @@ class MacroEngine:
                         elif ai_score < 50:
                             logger.info(f"❌ IA rechaza {symbol} (Score: {ai_score}). Cooldown {settings.COOLDOWN_AI_REJECT_MINUTES}m.")
                             self.cooldowns[symbol] = {"exp": now + (settings.COOLDOWN_AI_REJECT_MINUTES * 60), "reason": "IA Reject"}
+                            await self._record_shadow_trade(symbol, c.get('price', 0), tech_score, market_regime, raw_ai_json, "IA Reject")
                             await asyncio.sleep(5.0)
                             continue
                         
@@ -164,6 +192,7 @@ class MacroEngine:
                         })
                     else:
                         logger.info(f"🗑️ Descartado post-fusión {symbol} | Score Final: {final_score}")
+                        await self._record_shadow_trade(symbol, c.get('price', 0), tech_score, market_regime, raw_ai_json, "Low Final Score")
 
             except Exception as e:
                 logger.error(f"Error en ciclo Macro: {e}")

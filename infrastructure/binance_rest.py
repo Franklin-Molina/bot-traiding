@@ -120,11 +120,11 @@ class BinanceRest(ExchangeInterface):
             logger.error(f"Error obteniendo info de símbolo {symbol}: {e}")
             return None
 
-    async def get_klines(self, symbol: str, interval: str, limit: int = 100):
+    async def get_klines(self, symbol: str, interval: str, limit: int = 100, **kwargs):
         await self._acquire_token(weight=1)
         loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(None, lambda: self.client.klines(symbol=symbol, interval=interval, limit=limit))
+            return await loop.run_in_executor(None, lambda: self.client.klines(symbol=symbol, interval=interval, limit=limit, **kwargs))
         except Exception as e:
             logger.error(f"Error obteniendo klines para {symbol}: {e}")
             return []

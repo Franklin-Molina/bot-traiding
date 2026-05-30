@@ -380,6 +380,9 @@ class TradeExecutor:
                         ai_raw = ml_features.get("ai_raw", {})
                         ml_data = MLTrainingData(
                             trade_id=str(new_pos.id),
+                            trade_type="REAL",
+                            status="PENDING",
+                            entry_price=fill_price,
                             symbol=symbol,
                             market_regime=ml_features.get("market_regime"),
                             tech_score=ml_features.get("tech_score"),
@@ -772,14 +775,22 @@ class TradeExecutor:
             from sqlalchemy import update
             from datetime import datetime, UTC
             
-            is_winner = 1 if pnl_pct > 0.5 else 0
+            if pnl_pct < -0.1:
+                target_class = 0
+            elif pnl_pct <= 0.2:
+                target_class = 1
+            elif pnl_pct <= 1.0:
+                target_class = 2
+            else:
+                target_class = 3
             
             await session.execute(
                 update(MLTrainingData)
                 .where(MLTrainingData.trade_id == str(pos.id))
                 .values(
                     profit_pct=pnl_pct,
-                    is_winner=is_winner,
+                    target_class=target_class,
+                    status="CLOSED",
                     exit_time=datetime.now(UTC)
                 )
             )
