@@ -1,7 +1,13 @@
 
-**🔧 Abrir Ajustes del Teléfono**
+## 🚀 Accesos directos a Configuración
 
-[📱 Ir a Configuración](intent:#Intent;action=android.settings.SETTINGS;end)
+- [🔧 Configuración Principal](intent:#Intent;action=android.settings.SETTINGS;end)
+- [📶 Wi-Fi](intent:#Intent;action=android.settings.WIFI_SETTINGS;end)
+- [🔵 Bluetooth](intent:#Intent;action=android.settings.BLUETOOTH_SETTINGS;end)
+- [📱 Aplicaciones](intent:#Intent;action=android.settings.APPLICATION_SETTINGS;end)
+- [🔋 Batería](intent:#Intent;action=android.settings.BATTERY_SETTINGS;end)
+- [💾 Almacenamiento](intent:#Intent;action=android.settings.INTERNAL_STORAGE_SETTINGS;end)
+- [🌐 Datos Móviles](intent:#Intent;action=android.settings.DATA_ROAMING_SETTINGS;end)
 
 
 Arquitectura Maestro — Bot de Trading (V2.0)
