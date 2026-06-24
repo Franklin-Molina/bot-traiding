@@ -1,5 +1,11 @@
+
+**🔧 Abrir Ajustes del Teléfono**
+
+[📱 Ir a Configuración](intent:#Intent;action=android.settings.SETTINGS;end)
+
+
 Arquitectura Maestro — Bot de Trading (V2.0)
-[🔧 Abrir Configuración del Celular](intent:#Intent;action=android.settings.SETTINGS;end)
+
 
 Versión definitiva diseñada para:
 
