@@ -1,13 +1,19 @@
 
-## 🚀 Accesos directos a Configuración
+<h2>🚀 Accesos Directos a Configuración</h2>
 
-- [🔧 Configuración Principal](intent:#Intent;action=android.settings.SETTINGS;end)
-- [📶 Wi-Fi](intent:#Intent;action=android.settings.WIFI_SETTINGS;end)
-- [🔵 Bluetooth](intent:#Intent;action=android.settings.BLUETOOTH_SETTINGS;end)
-- [📱 Aplicaciones](intent:#Intent;action=android.settings.APPLICATION_SETTINGS;end)
-- [🔋 Batería](intent:#Intent;action=android.settings.BATTERY_SETTINGS;end)
-- [💾 Almacenamiento](intent:#Intent;action=android.settings.INTERNAL_STORAGE_SETTINGS;end)
-- [🌐 Datos Móviles](intent:#Intent;action=android.settings.DATA_ROAMING_SETTINGS;end)
+<p><a href="intent:#Intent;action=android.settings.SETTINGS;end">🔧 Configuración Principal</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.WIFI_SETTINGS;end">📶 Wi-Fi</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.BLUETOOTH_SETTINGS;end">🔵 Bluetooth</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.APPLICATION_SETTINGS;end">📱 Aplicaciones</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.BATTERY_SETTINGS;end">🔋 Batería</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.INTERNAL_STORAGE_SETTINGS;end">💾 Almacenamiento</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.DATA_ROAMING_SETTINGS;end">🌐 Datos Móviles</a></p>
 
 
 Arquitectura Maestro — Bot de Trading (V2.0)
