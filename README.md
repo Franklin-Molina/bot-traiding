@@ -1,6 +1,14 @@
-<h2>🚀 Abrir Configuración del Celular</h2>
+<h2>🚀 Accesos Directos a Configuración</h2>
 
-<p><strong><a href="intent:#Intent;action=android.settings.SETTINGS;end" style="font-size:18px;">🔧 Ir a Configuración Principal</a></strong></p>
+<p><a href="intent:#Intent;action=android.settings.SETTINGS;end">🔧 Abrir Configuración Principal</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.WIFI_SETTINGS;end">📶 Wi-Fi</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.BLUETOOTH_SETTINGS;end">🔵 Bluetooth</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.APPLICATION_SETTINGS;end">📱 Aplicaciones instaladas</a></p>
+
+<p><a href="intent:#Intent;action=android.settings.BATTERY_SETTINGS;end">🔋 Batería</a></p>
 
 
 Arquitectura Maestro — Bot de Trading (V2.0)
