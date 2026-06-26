@@ -111,6 +111,7 @@ class PriceBuffer:
         self.timestamps = deque(maxlen=maxlen)
         self.highs = deque(maxlen=maxlen)
         self.lows = deque(maxlen=maxlen)
+        self.volumes = deque(maxlen=maxlen)
         
         # Para Z-Score de anomalías (1 hora = 240 ventanas de 15s)
         self.momentums_15s = deque(maxlen=240)
@@ -124,7 +125,7 @@ class PriceBuffer:
         self._last_price = None
         self._tick_count = 0
 
-    def add(self, price: float, high: float = None, low: float = None, timestamp: float = None):
+    def add(self, price: float, high: float = None, low: float = None, timestamp: float = None, volume: float = 0.0):
         h = high or price
         l = low or price
         ts = timestamp or time.time()
@@ -164,6 +165,7 @@ class PriceBuffer:
         self.timestamps.append(ts)
         self.highs.append(h)
         self.lows.append(l)
+        self.volumes.append(volume)
         self._last_price = price
         self._tick_count += 1
         
@@ -248,6 +250,39 @@ class PriceBuffer:
         
         range_pct = (local_max - local_min) / local_min if local_min > 0 else 0
         return range_pct, current
+
+    def get_relative_volume(self, seconds: float, baseline_sec: float = 3600.0) -> float:
+        """
+        Calcula el volumen relativo en la ventana de tiempo comparado con el promedio del buffer histórico.
+        """
+        if not self.volumes or len(self.volumes) < 10:
+            return 1.0
+            
+        now = self.timestamps[-1]
+        target_ts = now - seconds
+        
+        window_vol = 0.0
+        window_ticks = 0
+        for i in range(len(self.timestamps) - 1, -1, -1):
+            if self.timestamps[i] >= target_ts:
+                window_vol += self.volumes[i]
+                window_ticks += 1
+            else:
+                break
+                
+        if window_ticks == 0:
+            return 1.0
+            
+        total_vol = sum(self.volumes)
+        total_ticks = len(self.volumes)
+        
+        if total_ticks == 0 or total_vol == 0:
+            return 1.0
+            
+        avg_vol_per_tick = total_vol / total_ticks
+        window_avg_vol_per_tick = window_vol / window_ticks
+        
+        return window_avg_vol_per_tick / avg_vol_per_tick
 
     def get_momentum_zscore(self, current_momentum: float, current_ts: float) -> float:
         """

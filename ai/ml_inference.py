@@ -11,6 +11,7 @@ class HybridInferenceEngine:
         self.model = None
         self.feature_names = []
         self.is_loaded = False
+        self.last_mtime = 0
         
         self.load_model()
 
@@ -29,6 +30,7 @@ class HybridInferenceEngine:
             self.model = xgb.XGBClassifier()
             self.model.load_model(self.model_path)
             
+            self.last_mtime = os.path.getmtime(self.model_path)
             self.is_loaded = True
             logger.success("🧠 Cerebro Cuantitativo (XGBoost) cargado correctamente.")
         except Exception as e:
@@ -38,10 +40,17 @@ class HybridInferenceEngine:
     def predict_trade(self, ml_features: dict) -> tuple[bool, float]:
         """
         Evalúa un trade potencial.
-        Retorna: (aprobado_bool, prob_exito)
         """
         if not self.is_loaded:
             return True, 0.5  # Si no hay modelo, permitimos el trade (Fallback)
+            
+        try:
+            current_mtime = os.path.getmtime(self.model_path)
+            if current_mtime > self.last_mtime:
+                self.load_model()
+                logger.info("♻️ Modelo XGBoost recargado en caliente.")
+        except Exception:
+            pass
 
         try:
             # 1. Preparar el diccionario de datos

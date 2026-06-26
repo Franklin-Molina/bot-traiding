@@ -137,6 +137,8 @@ class Position(Base):
     take_profit = Column(Float)
 
     stop_loss = Column(Float)
+    
+    tp_level = Column(Integer, default=0)
 
     highest_price = Column(Float)
 

@@ -257,7 +257,7 @@ class TradeExecutor:
 
             sl_dist = atr * settings.TRAILING_STOP_ATR_MULT if atr else price * settings.TRAILING_STOP_PERCENT
 
-            min_sl_dist = price * 0.008  # SL mínimo de 0.8% para evitar salidas muy tempranas
+            min_sl_dist = price * 0.006  # SL mínimo bajado a 0.6%
             max_sl_dist = price * 0.05
 
             sl_dist = max(
@@ -494,7 +494,7 @@ class TradeExecutor:
             # ============================
             # FIX: CLAMP TRAILING DISTANCE
             # ============================
-            min_sl_dist = current_price * 0.008  # Mismo límite mínimo de 0.8% que en la compra
+            min_sl_dist = current_price * 0.006  # SL mínimo de 0.6%
             max_sl_dist = current_price * 0.05
             
             trailing_distance = max(
@@ -545,33 +545,41 @@ class TradeExecutor:
         # ============================
         # BREAKEVEN MECHANISM
         # ============================
-        # Usamos ATR si está disponible para hacerlo dinámico
-        if atr:
-            trigger_distance = atr * 1.5 
-            profit_margin = atr * 0.2
+        pnl_pct = (current_price / pos.buy_price - 1) * 100
+        
+        # Breakeven escalonado
+        if pnl_pct >= 2.5:
+            breakeven_sl = pos.buy_price * (1 + 0.008) # +0.8%
+        elif pnl_pct >= 1.5:
+            breakeven_sl = pos.buy_price * (1 + 0.003) # +0.3%
+        elif pnl_pct >= 1.0:
+            breakeven_sl = pos.buy_price # Breakeven plano
         else:
-            trigger_distance = pos.buy_price * settings.BREAKEVEN_TRIGGER_PERCENT
-            profit_margin = pos.buy_price * settings.BREAKEVEN_PROFIT_PERCENT
+            breakeven_sl = 0
 
-        if current_price >= pos.buy_price + trigger_distance:
-            breakeven_sl = pos.buy_price + profit_margin
-            if breakeven_sl > pos.stop_loss:
-                pos.stop_loss = breakeven_sl
-                pos.last_sl_update_price = current_price
-                logger.info(f"🛡️ BREAKEVEN ACTIVADO para {symbol}: SL movido a {breakeven_sl:.6f}")
-                persistence_manager.enqueue_position_update(
-                    pos.id,
-                    {
-                        "stop_loss": breakeven_sl,
-                        "last_sl_update_price": current_price
-                    }
-                )
+        if breakeven_sl > pos.stop_loss:
+            pos.stop_loss = breakeven_sl
+            pos.last_sl_update_price = current_price
+            logger.info(f"🛡️ BREAKEVEN ACTIVADO para {symbol}: SL movido a {breakeven_sl:.6f}")
+            persistence_manager.enqueue_position_update(
+                pos.id,
+                {
+                    "stop_loss": breakeven_sl,
+                    "last_sl_update_price": current_price
+                }
+            )
 
         # ============================
-        # SOLO TRAILING STOP
+        # TAKE PROFIT PARCIAL
         # ============================
-
+        tp_level = getattr(pos, 'tp_level', 0)
+        
         exit_reason = None
+        
+        if pnl_pct >= 4.0 and tp_level == 1:
+            exit_reason = "PARTIAL_TP_2"
+        elif pnl_pct >= 2.0 and tp_level == 0:
+            exit_reason = "PARTIAL_TP_1"
 
         if current_price <= pos.stop_loss:
 
@@ -624,8 +632,9 @@ class TradeExecutor:
 
     async def execute_exit(self, pos: Position, expected_price: float, reason: str):
         symbol = pos.symbol
-        # Sacar de posiciones activas inmediatamente para evitar procesamiento paralelo de ticks
-        self.active_positions.pop(symbol, None)
+        is_partial = reason.startswith("PARTIAL_TP")
+        if not is_partial:
+            self.active_positions.pop(symbol, None)
 
         # 1. Validar Balance Real
         real_balance = await self._validate_exit_balance(symbol)
@@ -634,23 +643,28 @@ class TradeExecutor:
             await self._cleanup_ghost_position(pos)
             return
         elif real_balance < 0:
-            # Error de red, restaurar para reintento
             pos.closing = False
             self.active_positions[symbol] = pos
             return
+            
+        USDT_POR_TP_PARCIAL = 5.5
+        if expected_price > 0:
+            qty_parcial = min(USDT_POR_TP_PARCIAL / expected_price, pos.quantity * 0.5)
+        else:
+            qty_parcial = pos.quantity * 0.33
+            
+        qty_to_sell = qty_parcial if is_partial else pos.quantity
 
         client_order_id = self._generate_client_id("sell")
         start_perf = time.perf_counter()
 
-        # 2. Registrar Orden en DB
         await self._register_sell_order(pos, expected_price, client_order_id)
-
-        # 3. Ejecutar Venta
-        order_resp = await self._send_sell_order(symbol, expected_price, pos.quantity, client_order_id)
+        order_resp = await self._send_sell_order(symbol, expected_price, qty_to_sell, client_order_id)
 
         if order_resp:
             if order_resp.get("status") == "INSUFFICIENT_BALANCE":
-                await self.close_position_complete(pos, expected_price, "GHOST_CLEANUP", 0, 0, expected_price)
+                if not is_partial:
+                    await self.close_position_complete(pos, expected_price, "GHOST_CLEANUP", 0, 0, expected_price)
                 return
 
             fill_price = float(order_resp.get('price', expected_price))
@@ -660,13 +674,38 @@ class TradeExecutor:
             slippage = ((fill_price / expected_price) - 1) * 100 if expected_price > 0 else 0
             latency = (time.perf_counter() - start_perf) * 1000
             
-            await self.close_position_complete(pos, fill_price, reason, slippage, latency, expected_price)
-            await self._update_sell_order_filled(client_order_id, order_resp, fill_price, pos.quantity)
+            executed = float(order_resp.get('executedQty', qty_to_sell))
+            
+            if is_partial:
+                pos.quantity -= executed
+                if reason == "PARTIAL_TP_1": pos.tp_level = 1
+                elif reason == "PARTIAL_TP_2": pos.tp_level = 2
+                pos.closing = False
+                
+                async with async_session() as session:
+                    from sqlalchemy import update
+                    await session.execute(update(Position).where(Position.id == pos.id).values(quantity=pos.quantity, tp_level=pos.tp_level))
+                    
+                    history = TradeHistory(
+                        symbol=pos.symbol, buy_price=pos.buy_price, sell_price=fill_price, quantity=executed,
+                        pnl=(fill_price - pos.buy_price) * executed, pnl_percent=(fill_price / pos.buy_price - 1) * 100,
+                        reason=reason, expected_sell_price=expected_price, slippage_sell_pct=slippage, latency_ms=latency
+                    )
+                    session.add(history)
+                    await session.commit()
+                    
+                self._send_alert(f"💸 TAKE PROFIT PARCIAL ({reason}): {symbol} @ {fill_price:.6f}")
+                logger.success(f"Take Profit Parcial ejecutado: {symbol} - Qty: {executed}")
+            else:
+                await self.close_position_complete(pos, fill_price, reason, slippage, latency, expected_price)
+                
+            await self._update_sell_order_filled(client_order_id, order_resp, fill_price, executed)
         else:
             logger.error(f"Fallo en ejecución de venta para {symbol}. Restaurando estado.")
             await self._update_sell_order_rejected(client_order_id)
             pos.closing = False 
-            self.active_positions[symbol] = pos
+            if not is_partial:
+                self.active_positions[symbol] = pos
 
     async def _validate_exit_balance(self, symbol: str) -> float:
         base_asset = symbol.replace("USDT", "")
@@ -739,14 +778,22 @@ class TradeExecutor:
             await session.commit()
 
     async def close_position_complete(self, pos: Position, sell_price: float, reason: str, slippage: float, latency: float, expected_sell: float):
+        pnl_usd = (sell_price - pos.buy_price) * pos.quantity
         pnl_pct = (sell_price / pos.buy_price - 1) * 100
         
-        # 🛡️ Circuit Breaker: Actualizar PnL Diario
-        system_state.daily_pnl += pnl_pct
-        if system_state.daily_pnl <= system_state.max_daily_loss_pct:
-            logger.critical(f"🛑 CIRCUIT BREAKER ACTIVADO: Pérdida diaria de {system_state.daily_pnl:.2f}% excede límite.")
+        # 🛡️ Circuit Breaker: Actualizar PnL Diario y Semanal basado en CAPITAL TOTAL
+        pnl_pct_total_capital = (pnl_usd / settings.TOTAL_CAPITAL_USD) * 100
+        system_state.daily_pnl += pnl_pct_total_capital
+        system_state.weekly_pnl += pnl_pct_total_capital
+        
+        if system_state.weekly_pnl <= system_state.max_weekly_loss_pct:
+            logger.critical(f"🛑 CIRCUIT BREAKER SEMANAL ACTIVADO: Pérdida de {system_state.weekly_pnl:.2f}% excede límite.")
             system_state.set_paused(True)
-            self._send_alert(f"🛑 CIRCUIT BREAKER: Sistema pausado por pérdida diaria de {system_state.daily_pnl:.2f}%")
+            self._send_alert(f"🛑 EMERGENCY STOP: Sistema apagado por pérdida semanal de {system_state.weekly_pnl:.2f}%")
+        elif system_state.daily_pnl <= system_state.max_daily_loss_pct:
+            logger.critical(f"🛑 CIRCUIT BREAKER DIARIO ACTIVADO: Pérdida de {system_state.daily_pnl:.2f}% excede límite. Pausa de 4H.")
+            system_state.emergency_stop_until = time.time() + (4 * 3600)
+            self._send_alert(f"🛑 PAUSA 4 HORAS: Límite diario de pérdida alcanzado ({system_state.daily_pnl:.2f}%)")
 
         # Aplicar Cooldown de 15 minutos (900s) por defecto
         cooldown_time = 900

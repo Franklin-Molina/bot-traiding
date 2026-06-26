@@ -54,15 +54,27 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
     
     async def check_macro_trend(sym: str, current_p: float) -> bool:
         try:
-            klines = await binance_rest.get_klines(sym, '15m', limit=20)
-            if not klines or len(klines) < 10:
+            klines = await binance_rest.get_klines(sym, '15m', limit=96)
+            if not klines or len(klines) < 50:
                 return True
             closes = [float(k[4]) for k in klines]
             closes[-1] = current_p # Update last unclosed candle
             ema9 = TA.calculate_ema(closes, 9)
-            if ema9 is None:
+            ema21 = TA.calculate_ema(closes, 21)
+            ema50 = TA.calculate_ema(closes, 50)
+            if ema9 is None or ema21 is None or ema50 is None:
                 return True
-            return current_p > ema9
+                
+            cumulative_vp = sum(((float(k[2]) + float(k[3]) + float(k[4])) / 3) * float(k[5]) for k in klines)
+            cumulative_v = sum(float(k[5]) for k in klines)
+            vwap = cumulative_vp / cumulative_v if cumulative_v > 0 else 0
+                
+            # Rechazar SOLO si el precio está por debajo de las TRES medias O por debajo del VWAP fuertemente
+            if current_p < ema9 and current_p < ema21 and current_p < ema50:
+                return False
+            if current_p < vwap * 0.998: # Por debajo del VWAP con un pequeño margen
+                return False
+            return True
         except Exception as e:
             logger.error(f"Error en macro trend check para {sym}: {e}")
             return True
@@ -72,6 +84,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
     book_tickers = {} # symbol: {'bid': float, 'ask': float, 'last_update': float}
     last_analysis = {} # symbol: timestamp
     last_logged_score = {} # symbol: score
+    pending_entries = {} # symbol: {"trigger_price": p, "base_price": p, "ts": ts, "score": s, "ml": dict}
     
     cleanup_interval = 60
     last_cleanup = time.time()
@@ -250,9 +263,56 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                         executor.monitor_and_exit(symbol, current_price, atr=current_atr)
 
                         if recovery.is_in_warmup(symbol): continue
+                        
+                        now_ts = time.time()
+                        
+                        # --- VALIDACIÓN DE SEGUNDA ETAPA (Confirmador Adaptativo) ---
+                        if symbol in pending_entries:
+                            entry_data = pending_entries[symbol]
+                            
+                            atr_relative = entry_data.get("atr_rel", 0.002)
+                            if atr_relative > 0.005:
+                                confirm_seconds = 5
+                            elif atr_relative > 0.003:
+                                confirm_seconds = 8
+                            else:
+                                confirm_seconds = 12
+
+                            trigger_price = entry_data["trigger_price"]
+                            base_price = entry_data["base_price"]
+                            
+                            # Ejecución inmediata si sigue subiendo mucho (+0.05%)
+                            if current_price >= trigger_price * 1.0005:
+                                confirm_seconds = 0
+                                logger.info(f"⚡ {symbol} Momentum acelerado, forzando ejecución inmediata.")
+                                
+                            elapsed = now_ts - entry_data["ts"]
+                            if elapsed >= confirm_seconds:
+                                total_move = trigger_price - base_price
+                                max_retrace_price = trigger_price - (total_move * 0.5)
+                                
+                                if current_price >= max_retrace_price:
+                                    logger.success(f"✅ CONFIRMACIÓN EXITOSA: {symbol} no retrocedió >50%")
+                                    ml_features = entry_data["ml"]
+                                    
+                                    # INFERENCIA HÍBRIDA (XGBoost)
+                                    is_approved, prob_exito = inference_engine.predict_trade(ml_features)
+                                    
+                                    if not is_approved:
+                                        logger.warning(f"🚫 RECHAZO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%} < 40%")
+                                        active_candidates.pop(symbol, None)
+                                    else:
+                                        logger.success(f"✅ APROBADO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%}")
+                                        await executor.try_buy(symbol, current_price, entry_data["score"], atr=indicators.get('atr_14'), timestamp=tick.get('E'), momentum=ml_features.get("momentum_15s", 0), ml_features=ml_features)
+                                        active_candidates.pop(symbol, None)
+                                else:
+                                    logger.warning(f"🚫 COMPRA ABORTADA: {symbol} retrocedió >50% en los 10s de espera.")
+                                
+                                del pending_entries[symbol]
+                                last_analysis[symbol] = now_ts + 30 # Cooldown tras intento
 
                         # B. Evaluar entrada
-                        if symbol in active_candidates and symbol not in executor.active_positions:
+                        if symbol in active_candidates and symbol not in executor.active_positions and symbol not in pending_entries:
                             now_ts = time.time()
                             if now_ts - last_analysis.get(symbol, 0) < settings.STRATEGY_EVAL_INTERVAL: 
                                 continue
@@ -268,43 +328,64 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             entry_score = 0
                             momentum_ok = False
                             
-                            # 1. Micro-Momentum Real (Ventana Temporal 30s)
-                            price_1s_ago = price_buffers[symbol].get_price_ago(30.0)
+                            # 1. Micro-Momentum Real (Ventana Temporal 60s)
+                            price_60s_ago = price_buffers[symbol].get_price_ago(60.0)
                             momentum = 0.0
-                            if price_1s_ago:
-                                momentum = (current_price - price_1s_ago) / price_1s_ago
-                                local_range, _ = price_buffers[symbol].get_local_range(30.0)
+                            if price_60s_ago:
+                                momentum = (current_price - price_60s_ago) / price_60s_ago
+                                local_range, _ = price_buffers[symbol].get_local_range(60.0)
+                                
+                                # Volumen relativo (últimos 60s vs promedio histórico 1H)
+                                rel_volume = price_buffers[symbol].get_relative_volume(60.0, baseline_sec=3600.0)
                                 
                                 # Calcular Z-Score
                                 z_score = price_buffers[symbol].get_momentum_zscore(momentum, current_ts=now_ts)
                                 
                                 # --- CORTACIRCUITOS DE ANOMALÍAS (Flash Crash/Pump) ---
-                                # Disparamos si Z-Score > 3.0 (3 sigmas) o si falla catastróficamente con el umbral fijo
-                                is_anomaly = (z_score is not None and abs(z_score) > 3.0) or abs(momentum) > 0.006 or local_range > 0.010
+                                if z_score is not None and abs(z_score) > 3.5:
+                                    logger.warning(f"💥 ANOMALÍA GRAVE DETECTADA {symbol} | Z-Score: {z_score} > 3.5 | Descartando.")
+                                    system_state.invalidate_symbol_cache(symbol)
+                                    active_candidates.pop(symbol, None)
+                                    continue
+                                elif z_score is not None and abs(z_score) > 2.0:
+                                    logger.warning(f"⚠️ RUIDO DETECTADO {symbol} | Z-Score: {z_score} > 2.0 | Cooldown 60s.")
+                                    last_analysis[symbol] = now_ts + 60
+                                    continue
+                                    
+                                is_anomaly = abs(momentum) > 0.008 or local_range > 0.015
                                 
                                 if is_anomaly:
-                                    logger.warning(f"💥 ANOMALÍA DETECTADA {symbol} | Z-Score: {z_score} | Mom={momentum:.4%} | Range={local_range:.4%} | Disparando purga IA.")
-                                    system_state.invalidate_symbol_cache(symbol)
+                                    logger.warning(f"💥 MOVIMIENTO EXTREMO DETECTADO {symbol} | Mom={momentum:.4%} | Range={local_range:.4%} | Cooldown.")
+                                    last_analysis[symbol] = now_ts + 120
+                                    continue
                                 
-                                # Filtro Táctico: > 0.04% de movimiento fuerte y seco en 30s
-                                if momentum > 0.0004:
+                                # Filtro Táctico: > 0.04% de movimiento fuerte en 60s + Volumen Relativo
+                                if momentum > 0.0004 and rel_volume > 1.5:
                                     entry_score += 30
                                     
                                     # 2. Expansión de Rango Local (Volatility Breakout ajustado)
                                     if local_range > 0.0004: # 0.04% min expansion
                                         entry_score += 20
                                         momentum_ok = True
-                                        logger.success(f"🔥 MOMENTUM REAL {symbol} | Mom={momentum:.4%} | Range={local_range:.4%}")
+                                        logger.success(f"🔥 MOMENTUM REAL {symbol} | Mom={momentum:.4%} | Range={local_range:.4%} | RelVol={rel_volume:.2f}")
 
-                            # 3. Spread (Estricto)
+                            # 3. Spread Adaptativo
                             spread_ok = False
                             if symbol in book_tickers:
-                                if spread_pct <= settings.MAX_SPREAD_PERCENT:
+                                max_spread = 0.0005
+                                if atr_rel < 0.003:
+                                    max_spread = 0.0005
+                                elif atr_rel < 0.008:
+                                    max_spread = 0.0008
+                                else:
+                                    max_spread = 0.0012
+                                    
+                                if spread_pct <= max_spread:
                                     entry_score += 30
                                     spread_ok = True
                                     current_price = book_tickers[symbol]['ask']
                                 else:
-                                    logger.warning(f"❌ SPREAD FAIL {symbol} | {spread_pct:.4%} > {settings.MAX_SPREAD_PERCENT:.4%}")
+                                    logger.warning(f"❌ SPREAD FAIL {symbol} | {spread_pct:.4%} > {max_spread:.4%} (ATR: {atr_rel:.4%})")
 
                             # 4. ATR (Volatilidad Mínima)
                             if atr_rel >= settings.MIN_ATR_RELATIVE:
@@ -338,7 +419,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     last_analysis[symbol] = now_ts + 60 
                                     continue
 
-                                logger.success(f"🚀 GATILLO TÁCTICO: {symbol} Score: {entry_score} | Price: {current_price}")
+                                logger.success(f"🚀 GATILLO TÁCTICO PENDIENTE DE CONFIRMACIÓN: {symbol} Score: {entry_score} | Price: {current_price}")
                                 
                                 ml_features = {
                                     "market_regime": candidate.get("market_regime", "NORMAL"),
@@ -349,47 +430,14 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     "ai_raw": candidate.get("ai_raw", {})
                                 }
                                 
-                                # INFERENCIA HÍBRIDA (XGBoost)
-                                is_approved, prob_exito = inference_engine.predict_trade(ml_features)
-                                
-                                if not is_approved:
-                                    logger.warning(f"🚫 RECHAZO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%} < 40%")
-                                    
-                                    # Registrar Shadow Trade por Rechazo de ML
-                                    from sqlalchemy import update
-                                    from infrastructure.database import async_session
-                                    from models.trading import MLTrainingData
-                                    import uuid
-                                    
-                                    async with async_session() as session:
-                                        shadow = MLTrainingData(
-                                            trade_id=f"shadow_{uuid.uuid4().hex[:8]}",
-                                            trade_type="SHADOW",
-                                            status="PENDING",
-                                            reject_reason="Rechazo XGBoost",
-                                            entry_price=current_price,
-                                            symbol=symbol,
-                                            market_regime=ml_features["market_regime"],
-                                            tech_score=ml_features["tech_score"],
-                                            spread=spread_pct,
-                                            momentum_15s=momentum,
-                                            local_range_15s=local_range,
-                                            ai_risk=ml_features["ai_raw"].get("risk", 0.0),
-                                            ai_manipulation=ml_features["ai_raw"].get("manipulation", 0.0),
-                                            ai_news=ml_features["ai_raw"].get("news_strength", 0.0),
-                                            ai_momentum=ml_features["ai_raw"].get("momentum", 0.0),
-                                            ai_confidence=ml_features["ai_raw"].get("confidence", 0.0)
-                                        )
-                                        session.add(shadow)
-                                        await session.commit()
-                                        
-                                    active_candidates.pop(symbol, None)
-                                    continue
-                                    
-                                logger.success(f"✅ APROBADO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%}")
-                                
-                                await executor.try_buy(symbol, current_price, candidate['score'], atr=indicators['atr_14'], timestamp=tick.get('E'), momentum=momentum, ml_features=ml_features)
-                                active_candidates.pop(symbol, None)
+                                # Enviar a cola de confirmación (10s)
+                                pending_entries[symbol] = {
+                                    "trigger_price": current_price,
+                                    "base_price": price_60s_ago,
+                                    "ts": now_ts,
+                                    "score": entry_score,
+                                    "ml": ml_features
+                                }
 
                     except Exception as e:
                         logger.exception(f"Error procesando tick para {tick.get('s', 'unknown')}: {e}")
