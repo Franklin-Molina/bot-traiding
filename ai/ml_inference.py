@@ -90,8 +90,8 @@ class HybridInferenceEngine:
             logger.debug(f"XGBoost Probs: SL={prob_0:.1%} | Noise={prob_1:.1%} | Good={prob_2:.1%} | Excel={prob_3:.1%}")
 
             # 4. Umbral de Aprobación
-            # Queremos que la suma de probabilidades buenas sea mayor al 40% (Threshold estricto)
-            is_approved = prob_exito >= 0.40
+            # Queremos que la suma de probabilidades buenas sea mayor al 70% (Threshold EXTREMADAMENTE estricto)
+            is_approved = prob_exito >= 0.70
 
             return is_approved, prob_exito
 

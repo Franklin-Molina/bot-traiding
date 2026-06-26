@@ -545,8 +545,16 @@ class TradeExecutor:
         # ============================
         # BREAKEVEN MECHANISM
         # ============================
-        if current_price >= pos.buy_price * (1 + settings.BREAKEVEN_TRIGGER_PERCENT):
-            breakeven_sl = pos.buy_price * (1 + settings.BREAKEVEN_PROFIT_PERCENT)
+        # Usamos ATR si está disponible para hacerlo dinámico
+        if atr:
+            trigger_distance = atr * 1.5 
+            profit_margin = atr * 0.2
+        else:
+            trigger_distance = pos.buy_price * settings.BREAKEVEN_TRIGGER_PERCENT
+            profit_margin = pos.buy_price * settings.BREAKEVEN_PROFIT_PERCENT
+
+        if current_price >= pos.buy_price + trigger_distance:
+            breakeven_sl = pos.buy_price + profit_margin
             if breakeven_sl > pos.stop_loss:
                 pos.stop_loss = breakeven_sl
                 pos.last_sl_update_price = current_price

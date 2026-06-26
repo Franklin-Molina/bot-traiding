@@ -117,17 +117,23 @@ class MacroEngine:
                         change = float(t['priceChangePercent'])
                         volume = float(t['quoteVolume'])
                         
-                        if change >= 2.0 and volume > 10_000_000:
-                            spread = spreads.get(symbol, 1.0)
+                        if change >= 1.0 and volume > 10_000_000:
+                            if symbol not in spreads:
+                                logger.debug(f"Descartado {symbol}: No tiene liquidez o fue delistada (No Orderbook)")
+                                self.cooldowns[symbol] = {"exp": now + (settings.COOLDOWN_SPREAD_MINUTES * 60), "reason": "No Orderbook"}
+                                continue
+                                
+                            spread = spreads[symbol]
                             if spread > settings.MAX_SPREAD_PERCENT:
+                                logger.debug(f"Descartado {symbol} por Spread Alto: {spread*100:.2f}% (Máx {settings.MAX_SPREAD_PERCENT*100:.2f}%)")
                                 self.cooldowns[symbol] = {"exp": now + (settings.COOLDOWN_SPREAD_MINUTES * 60), "reason": "Spread Alto"}
                                 continue
                                 
                             # Calcular Technical Score
                             # Normalizar volumen (10M a 100M+) -> 0 a 50 puntos
                             vol_score = min(max((math.log10(max(volume, 1)) - 7) / 1.5 * 50, 0), 50)
-                            # Normalizar change (2% a 20%+) -> 0 a 50 puntos
-                            chg_score = min(max((change - 2) / 18 * 50, 0), 50)
+                            # Normalizar change (1% a 20%+) -> 0 a 50 puntos
+                            chg_score = min(max((change - 1.0) / 19.0 * 50, 0), 50)
                             
                             tech_score = int(vol_score + chg_score)
                             
@@ -144,11 +150,15 @@ class MacroEngine:
                 # 4. ORDENAR Y LIMITAR (Modo Degradado)
                 candidates = sorted(candidates, key=lambda x: x['tech_score'], reverse=True)
                 
-                top_n = 1 if market_regime == "DEAD" else 3
-                # Usar el valor de la configuración como base, sumar 15 puntos solo si está DEAD
-                min_tech_req = settings.MIN_TECHNICAL_SCORE_AI + 15 if market_regime == "DEAD" else settings.MIN_TECHNICAL_SCORE_AI
+                top_n = 3
+                # Remover penalidad pre-IA para que evalúe a los candidatos con al menos MIN_TECHNICAL_SCORE_AI
+                min_tech_req = settings.MIN_TECHNICAL_SCORE_AI
                 
                 candidates_to_eval = [c for c in candidates if c['tech_score'] >= min_tech_req][:top_n]
+
+                if candidates and not candidates_to_eval:
+                    max_score_found = candidates[0]['tech_score']
+                    logger.info(f"⚠️ Candidatos descartados por Régimen {market_regime}. Necesitaban {min_tech_req} pts, el mejor tuvo {max_score_found} pts.")
 
                 for c in candidates_to_eval:
                     symbol = c['symbol']
@@ -181,7 +191,11 @@ class MacroEngine:
                     # LOGGING ML (Telemetría)
                     logger.debug(f"📊 ML-TELEMETRY | {symbol} | Market: {market_score} | Tech: {tech_score} | AI: {ai_score} | Final: {final_score} | AI_Raw: {raw_ai_json}")
                     
-                    if final_score >= settings.MIN_TECHNICAL_SCORE_AI or (not system_state.ai_enabled and tech_score >= settings.MIN_TECHNICAL_SCORE_AI + 5):
+                    umbral_aprobacion = settings.MIN_TECHNICAL_SCORE_AI
+                    if market_regime == "DEAD":
+                        umbral_aprobacion -= 5
+                        
+                    if final_score >= umbral_aprobacion or (not system_state.ai_enabled and tech_score >= settings.MIN_TECHNICAL_SCORE_AI + 5):
                         logger.success(f"🚀 ¡Aprobado! {symbol} | Score Final: {final_score}")
                         await self.candidates_queue.put({
                             "symbol": symbol, 

@@ -46,7 +46,7 @@ class AICircuitBreaker:
         """
         Bloquea una clave por un tiempo determinado (cooldown).
         """
-        logger.warning(f"Bloqueando API Key {key[:8]}... por {duration}s.")
+        logger.warning(f"Bloqueando API Key {key[:15]}... por {duration}s.")
         self.blocked_keys[key] = asyncio.get_event_loop().time() + duration
 
 class AIOrchestrator:

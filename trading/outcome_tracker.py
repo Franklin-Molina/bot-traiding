@@ -106,49 +106,55 @@ class OutcomeTracker:
         barrier_hit = "TIMEOUT"
         exit_time = shadow.entry_time + timedelta(minutes=self.timeout_minutes)
 
+        highest_price = entry_price
+        current_sl = entry_price * (1 + self.sl_pct)
+        from core.config import settings
+
         for k in klines[:self.timeout_minutes]:
             high = float(k[2])
             low = float(k[3])
             close = float(k[4])
             kline_time = datetime.fromtimestamp(k[0] / 1000.0, UTC)
             
-            # Calcular excursión de esta vela
-            current_mfe = (high - entry_price) / entry_price
+            # 1. Chequear Stop Loss (pesimista: asumimos que el low se alcanza primero)
+            if low <= current_sl:
+                barrier_hit = "TRAILING_STOP" if current_sl > entry_price else "STOP_LOSS"
+                final_profit = (current_sl - entry_price) / entry_price
+                exit_time = kline_time
+                break
+                
+            # 2. Actualizar Highest Price y Trailing Stop
+            if high > highest_price:
+                highest_price = high
+                # Simular Trailing Stop
+                trailing_distance = highest_price * settings.TRAILING_STOP_PERCENT
+                min_sl_dist = highest_price * 0.008
+                max_sl_dist = highest_price * 0.05
+                trailing_distance = max(min(trailing_distance, max_sl_dist), min_sl_dist)
+                
+                new_sl = highest_price - trailing_distance
+                if new_sl > current_sl:
+                    current_sl = new_sl
+            
+            # Calcular excursiones
+            current_mfe = (highest_price - entry_price) / entry_price
             current_mae = (low - entry_price) / entry_price
-
-            if current_mfe > mfe_pct:
-                mfe_pct = current_mfe
-            if current_mae < mae_pct:
-                mae_pct = current_mae
-
-            # Evaluar barreras
-            # ¿Toca SL primero en la misma vela? Es difícil saberlo con 1m. Asumimos el peor caso (SL primero) si ambos tocan.
-            if mae_pct <= self.sl_pct:
-                barrier_hit = "STOP_LOSS"
-                final_profit = self.sl_pct
-                target_class = 0
-                exit_time = kline_time
-                break
-            elif mfe_pct >= self.tp_pct:
-                barrier_hit = "TAKE_PROFIT"
-                final_profit = self.tp_pct
-                target_class = 3
-                exit_time = kline_time
-                break
+            
+            if current_mfe > mfe_pct: mfe_pct = current_mfe
+            if current_mae < mae_pct: mae_pct = current_mae
             
             # Actualizar profit al cierre de la vela actual en caso de timeout
             final_profit = (close - entry_price) / entry_price
 
-        # Si fue TIMEOUT, calculamos clase basada en final_profit
-        if barrier_hit == "TIMEOUT":
-            if final_profit < -0.001:  # Menor a -0.1%
-                target_class = 0
-            elif final_profit <= 0.002: # Entre -0.1% y +0.2%
-                target_class = 1
-            elif final_profit <= 0.01:  # Entre +0.2% y +1.0%
-                target_class = 2
-            else:
-                target_class = 3
+        # Calcular clase basada en final_profit
+        if final_profit < -0.001:  # Menor a -0.1%
+            target_class = 0
+        elif final_profit <= 0.002: # Entre -0.1% y +0.2%
+            target_class = 1
+        elif final_profit <= 0.01:  # Entre +0.2% y +1.0%
+            target_class = 2
+        else:
+            target_class = 3
 
         logger.debug(f"👻 SHADOW RES: {shadow.symbol} | Barrier: {barrier_hit} | MFE: {mfe_pct:.2%} | MAE: {mae_pct:.2%} | Class: {target_class}")
 
