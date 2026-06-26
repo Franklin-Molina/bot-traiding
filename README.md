@@ -1,4 +1,7 @@
+
+
 Arquitectura Maestro — Bot de Trading (V2.0)
+
 
 Versión definitiva diseñada para:
 
