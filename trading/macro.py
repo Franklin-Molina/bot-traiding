@@ -67,7 +67,7 @@ class MacroEngine:
                     
                     if market_score < 30 or btc_change < -0.5:
                         market_regime = "DEAD"
-                        scan_interval_override = 10 # mins
+                        scan_interval_override = 3 # mins
                     elif market_score > 75:
                         market_regime = "HOT"
                 
@@ -100,8 +100,16 @@ class MacroEngine:
                                 continue
                                 
                             spread = spreads[symbol]
-                            if spread > settings.MAX_SPREAD_PERCENT:
-                                logger.debug(f"Descartado {symbol} por Spread Alto: {spread*100:.3f}% (Máx {settings.MAX_SPREAD_PERCENT*100:.3f}%)")
+                            
+                            # Spread Dinámico según el Régimen
+                            tolerancia_spread = settings.MAX_SPREAD_PERCENT
+                            if market_regime == "DEAD":
+                                tolerancia_spread = 0.0012 
+                            elif market_regime == "HOT":
+                                tolerancia_spread = 0.0005
+                                
+                            if spread > tolerancia_spread:
+                                logger.debug(f"Descartado {symbol} por Spread Alto: {spread*100:.3f}% (Máx {tolerancia_spread*100:.3f}%)")
                                 self.cooldowns[symbol] = {"exp": now + (settings.COOLDOWN_SPREAD_MINUTES * 60), "reason": "Spread Alto"}
                                 continue
                                 

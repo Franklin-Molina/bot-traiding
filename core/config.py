@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     TOTAL_CAPITAL_USD: float = 1000.0    # Capital total base para calcular drawdown global
     RISK_PER_TRADE: float = 0.025        # 2.5% del capital total como riesgo máximo por trade
     MIN_ATR_RELATIVE: float = 0.0020     # Volatilidad mínima (0.20%+)
-    MAX_SPREAD_PERCENT: float = 0.0005   # Spread máximo aceptable (0.05%) - Estricto para scalping
+    MAX_SPREAD_PERCENT: float = 0.0010   # Spread máximo aceptable (0.10%) - Aumentado para Altcoins
     MAX_SLIPPAGE_PERCENT: float = 0.005  # Slippage máximo aceptable (0.50%)
     MAX_PRICE_AGE_MS: int = 1500         # Precio válido máximo 1.5 segundos (Tolerancia de latencia de red)
     STRATEGY_EVAL_INTERVAL: float = 0.25  # Evaluar estrategia máximo cada 250ms
@@ -34,15 +34,16 @@ class Settings(BaseSettings):
     COOLDOWN_SPREAD_MINUTES: int = 15
     COOLDOWN_FLASH_CRASH_MINUTES: int = 120
     COOLDOWN_REJECT_MINUTES: int = 60
-    MIN_TECHNICAL_SCORE_AI: int = 65
     
-    # Trailing Stop: se usa ATR si hay datos suficientes, porcentaje como fallback
-    TRAILING_STOP_ATR_MULT: float = 3.0  # Multiplicador ATR para trailing stop dinámico (reducido a 3.0)
-    TRAILING_STOP_PERCENT: float = 0.012 # 1.2% trailing stop fijo (fallback sin ATR)
-    MIN_TRAILING_STOP_PERCENT: float = 0.006 # 0.6% distancia mínima permitida para el trailing stop
+    # ML & Feature Engineering
+    MIN_TECHNICAL_SCORE_AI: int = 65      # Reducido un poco para dar más peso al ML (antes 70)
+    MAX_RSI_ENTRY: float = 75.0           # Evitar comprar en sobrecompra extrema
+    MIN_VOLUME_M: float = 10.0            # Volumen 24h mínimo en millones
     
-    # Breakeven Mechanism
-    BREAKEVEN_TRIGGER_PERCENT: float = 0.015  # 1.5% trigger para asegurar breakeven
+    # Advanced Trade Management
+    TRAILING_STOP_ACTIVATION: float = 0.015   # Activar TS al 1.5% de ganancia
+    TRAILING_STOP_CALLBACK: float = 0.005     # Callback de 0.5% (Se cierra si retrocede un 0.5% desde el pico)
+    BREAKEVEN_TRIGGER_PERCENT: float = 0.008  # 0.8% trigger para asegurar breakeven (Más rápido en mercado DEAD)
     BREAKEVEN_PROFIT_PERCENT: float = 0.005   # Asegurar al menos +0.5% cuando se activa breakeven
     
 
