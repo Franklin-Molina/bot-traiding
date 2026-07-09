@@ -125,6 +125,20 @@ class PriceBuffer:
         self._last_price = None
         self._tick_count = 0
 
+    def clear(self):
+        self.prices.clear()
+        self.timestamps.clear()
+        self.highs.clear()
+        self.lows.clear()
+        self.volumes.clear()
+        self.momentums_15s.clear()
+        self._ema_20 = None
+        self._avg_gain_14 = None
+        self._avg_loss_14 = None
+        self._atr_14 = None
+        self._last_price = None
+        self._tick_count = 0
+
     def add(self, price: float, high: float = None, low: float = None, timestamp: float = None, volume: float = 0.0):
         h = high or price
         l = low or price

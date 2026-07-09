@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     TOTAL_CAPITAL_USD: float = 1000.0    # Capital total base para calcular drawdown global
     RISK_PER_TRADE: float = 0.025        # 2.5% del capital total como riesgo máximo por trade
     MIN_ATR_RELATIVE: float = 0.0020     # Volatilidad mínima (0.20%+)
-    MAX_SPREAD_PERCENT: float = 0.0010   # Spread máximo aceptable (0.10%) - Aumentado para Altcoins
+    MAX_SPREAD_PERCENT: float = 0.0015   # Spread máximo aceptable (0.15%) - Aumentado para Altcoins
     MAX_SLIPPAGE_PERCENT: float = 0.005  # Slippage máximo aceptable (0.50%)
     MAX_PRICE_AGE_MS: int = 1500         # Precio válido máximo 1.5 segundos (Tolerancia de latencia de red)
     STRATEGY_EVAL_INTERVAL: float = 0.25  # Evaluar estrategia máximo cada 250ms
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     COOLDOWN_REJECT_MINUTES: int = 60
     
     # ML & Feature Engineering
-    MIN_TECHNICAL_SCORE_AI: int = 65      # Reducido un poco para dar más peso al ML (antes 70)
+    MIN_TECHNICAL_SCORE_AI: int = 60      # Reducido para atrapar subidas más tempranas (antes 65)
     MAX_RSI_ENTRY: float = 75.0           # Evitar comprar en sobrecompra extrema
     MIN_VOLUME_M: float = 10.0            # Volumen 24h mínimo en millones
     

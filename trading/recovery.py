@@ -44,9 +44,14 @@ class RecoveryEngine:
                 last_ts = current_ts
 
             # 3. Rellenar buffer
+            buffer.clear()
             for k in klines:
-                # Usamos el precio de cierre para indicadores
-                buffer.add(float(k[4]))
+                # k[4] = Close, k[5] = Volume, k[6] = Close Time (ms)
+                buffer.add(
+                    price=float(k[4]), 
+                    timestamp=k[6] / 1000.0, 
+                    volume=float(k[5])
+                )
             
             logger.success(f"✅ Estado de {symbol} reconstruido. Saliendo de Warmup.")
                 

@@ -160,7 +160,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
         now = time.time()
         if now - last_cleanup > cleanup_interval:
             last_cleanup = now
-            expired_candidates = [s for s, c in active_candidates.items() if now - c['created_at'] > 300]
+            expired_candidates = [s for s, c in active_candidates.items() if now - c['created_at'] > 1800] # 30 mins paciencia
             for s in expired_candidates:
                 del active_candidates[s]
             
@@ -372,13 +372,18 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             # 3. Spread Adaptativo
                             spread_ok = False
                             if symbol in book_tickers:
-                                max_spread = 0.0005
-                                if atr_rel < 0.003:
-                                    max_spread = 0.0005
-                                elif atr_rel < 0.008:
-                                    max_spread = 0.0008
+                                market_regime = candidate.get("market_regime", "WARM")
+                                
+                                if market_regime == "HOT":
+                                    max_spread = settings.MAX_SPREAD_PERCENT # 0.0015
+                                elif market_regime == "WARM":
+                                    max_spread = 0.0010
                                 else:
-                                    max_spread = 0.0012
+                                    max_spread = 0.0008
+                                    
+                                # Permitir un poco de holgura extra basada en ATR si hay muchísima volatilidad
+                                if atr_rel > 0.01:
+                                    max_spread = max(max_spread, 0.0020)
                                     
                                 if spread_pct <= max_spread:
                                     entry_score += 30
