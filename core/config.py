@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     # Advanced Trade Management
     TRAILING_STOP_ACTIVATION: float = 0.015   # Activar TS al 1.5% de ganancia
     TRAILING_STOP_CALLBACK: float = 0.005     # Callback de 0.5% (Se cierra si retrocede un 0.5% desde el pico)
+    TRAILING_STOP_PERCENT: float = 0.005      # Distancia de trailing (usado si ATR no está disponible)
+    TRAILING_STOP_ATR_MULT: float = 2.0       # Multiplicador ATR para el Stop Loss dinámico
     BREAKEVEN_TRIGGER_PERCENT: float = 0.008  # 0.8% trigger para asegurar breakeven (Más rápido en mercado DEAD)
     BREAKEVEN_PROFIT_PERCENT: float = 0.005   # Asegurar al menos +0.5% cuando se activa breakeven
     
