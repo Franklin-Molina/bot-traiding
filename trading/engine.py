@@ -299,7 +299,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     is_approved, prob_exito = inference_engine.predict_trade(ml_features)
                                     
                                     if not is_approved:
-                                        logger.warning(f"🚫 RECHAZO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%} < 40%")
+                                        logger.warning(f"🚫 RECHAZO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%} < 60%")
                                         active_candidates.pop(symbol, None)
                                     else:
                                         logger.success(f"✅ APROBADO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%}")
@@ -359,12 +359,12 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     last_analysis[symbol] = now_ts + 120
                                     continue
                                 
-                                # Filtro Táctico: > 0.04% de movimiento fuerte en 60s + Volumen Relativo
-                                if momentum > 0.0004 and rel_volume > 1.5:
+                                # Filtro Táctico: > 0.03% de movimiento fuerte en 60s + Volumen Relativo
+                                if momentum > 0.0003 and rel_volume > 1.2:
                                     entry_score += 30
                                     
                                     # 2. Expansión de Rango Local (Volatility Breakout ajustado)
-                                    if local_range > 0.0004: # 0.04% min expansion
+                                    if local_range > 0.0003: # 0.03% min expansion
                                         entry_score += 20
                                         momentum_ok = True
                                         logger.success(f"🔥 MOMENTUM REAL {symbol} | Mom={momentum:.4%} | Range={local_range:.4%} | RelVol={rel_volume:.2f}")
@@ -375,11 +375,11 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                 market_regime = candidate.get("market_regime", "WARM")
                                 
                                 if market_regime == "HOT":
-                                    max_spread = settings.MAX_SPREAD_PERCENT # 0.0015
+                                    max_spread = settings.MAX_SPREAD_PERCENT
                                 elif market_regime == "WARM":
-                                    max_spread = 0.0010
+                                    max_spread = settings.MAX_SPREAD_PERCENT * 0.8
                                 else:
-                                    max_spread = 0.0008
+                                    max_spread = settings.MAX_SPREAD_PERCENT * 0.6
                                     
                                 # Permitir un poco de holgura extra basada en ATR si hay muchísima volatilidad
                                 if atr_rel > 0.01:

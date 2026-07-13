@@ -102,11 +102,11 @@ class MacroEngine:
                             spread = spreads[symbol]
                             
                             # Spread Dinámico según el Régimen
-                            tolerancia_spread = settings.MAX_SPREAD_PERCENT # HOT default (0.0015)
+                            tolerancia_spread = settings.MAX_SPREAD_PERCENT # HOT default
                             if market_regime == "DEAD":
-                                tolerancia_spread = 0.0008 
+                                tolerancia_spread = settings.MAX_SPREAD_PERCENT * 0.6  # 60% of max
                             elif market_regime == "WARM":
-                                tolerancia_spread = 0.0010
+                                tolerancia_spread = settings.MAX_SPREAD_PERCENT * 0.8  # 80% of max
                                 
                             if spread > tolerancia_spread:
                                 logger.debug(f"Descartado {symbol} por Spread Alto: {spread*100:.3f}% (Máx {tolerancia_spread*100:.3f}%)")
