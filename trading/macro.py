@@ -94,7 +94,14 @@ class MacroEngine:
                         change = float(t['priceChangePercent'])
                         volume = float(t['quoteVolume'])
                         
-                        if change >= 1.0 and volume > 10_000_000:
+                        # Volumen dinámico según régimen de mercado
+                        min_volume = settings.MIN_VOLUME_M * 1_000_000 # Default HOT (ej. 10M)
+                        if market_regime == "DEAD":
+                            min_volume = (settings.MIN_VOLUME_M * 1_000_000) * 0.3  # Bajamos exigencia al 30% (ej. 3M)
+                        elif market_regime == "WARM":
+                            min_volume = (settings.MIN_VOLUME_M * 1_000_000) * 0.5  # Exigencia al 50% (ej. 5M)
+                            
+                        if change >= 1.0 and volume >= min_volume:
                             if symbol not in spreads:
                                 self.cooldowns[symbol] = {"exp": now + (settings.COOLDOWN_SPREAD_MINUTES * 60), "reason": "No Orderbook"}
                                 continue
