@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     COOLDOWN_REJECT_MINUTES: int = 60
     
     # ML & Feature Engineering
-    MIN_TECHNICAL_SCORE_AI: int = 60      # Reducido para atrapar subidas más tempranas (antes 65)
+    MIN_TECHNICAL_SCORE_AI: int = 55      # Reducido para atrapar subidas más tempranas (antes 65)
     MAX_RSI_ENTRY: float = 75.0           # Evitar comprar en sobrecompra extrema
     MIN_VOLUME_M: float = 10.0            # Volumen 24h mínimo en millones
     
