@@ -41,6 +41,7 @@ class SystemState:
         self.ai_enabled = True
         self.task_registry = TaskRegistry()
         self.daily_pnl = 0.0
+        self.weekly_pnl = 0.0
         self.max_daily_loss_pct = -5.0
         self.max_weekly_loss_pct = -10.0
         self.emergency_stop_until = 0.0
