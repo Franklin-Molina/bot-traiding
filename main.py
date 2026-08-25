@@ -11,7 +11,7 @@ from trading.outcome_tracker import OutcomeTracker
 from core.config import settings
 from infrastructure.database import init_db
 from infrastructure.event_logger import event_logger
-from infrastructure.binance_rest import BinanceRest
+from infrastructure.binance_rest import get_binance_rest
 from infrastructure.paper_exchange import PaperExchange
 from trading.slots import SlotManager
 
@@ -56,8 +56,8 @@ async def main():
     market_queue = asyncio.Queue(maxsize=settings.MARKET_QUEUE_MAXSIZE)
     strategy_queue = asyncio.Queue(maxsize=50)
 
-    # 4. Exchange Interface para Reconciliación
-    exchange = PaperExchange() if settings.SIMULATION_MODE else BinanceRest()
+    # 4. Exchange Interface — ARQ-1: Singleton compartido
+    exchange = PaperExchange() if settings.SIMULATION_MODE else get_binance_rest()
     if not settings.SIMULATION_MODE:
         await exchange.sync_time()
 

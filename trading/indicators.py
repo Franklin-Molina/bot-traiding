@@ -159,8 +159,9 @@ class PriceBuffer:
             loss = abs(min(price - self._last_price, 0))
             
             if self._avg_gain_14 is None:
-                if len(self.prices) >= 14: # Aproximación inicial tras tener suficientes datos
-                    pass 
+                # ARQ-4 FIX: Intentar inicializar si tenemos suficientes datos
+                if len(self.prices) >= 14:
+                    self._initialize_rsi_atr()
             else:
                 self._avg_gain_14 = (self._avg_gain_14 * 13 + gain) / 14
                 self._avg_loss_14 = (self._avg_loss_14 * 13 + loss) / 14
@@ -170,7 +171,7 @@ class PriceBuffer:
             tr = max(h - l, abs(h - self._last_price), abs(l - self._last_price))
             if self._atr_14 is None:
                 if len(self.prices) >= 14:
-                    pass
+                    self._initialize_rsi_atr()
             else:
                 self._atr_14 = (self._atr_14 * 13 + tr) / 14
 
@@ -184,10 +185,11 @@ class PriceBuffer:
         self._tick_count += 1
         
         # Recalcular bases si aún no están inicializadas (Warmup)
-        if self._tick_count == 20 and self._ema_20 is None:
+        if self._ema_20 is None and len(self.prices) >= 20:
              self._ema_20 = TA.calculate_ema(list(self.prices), 20)
         
-        if self._tick_count == 15: # 14 diferencias
+        # ARQ-4 FIX: Inicializar siempre que tengamos datos suficientes (no solo en tick_count==15)
+        if self._avg_gain_14 is None and len(self.prices) >= 15:
             self._initialize_rsi_atr()
 
     def _initialize_rsi_atr(self):
@@ -325,21 +327,71 @@ class PriceBuffer:
     def get_indicators(self, update_atr: bool = False):
         """
         Retorna indicadores precalculados incrementalmente.
+        FEAT-5: Añadidos bollinger_pos, tick_rate, atr_relative.
         """
         if self._ema_20 is None or self._avg_gain_14 is None:
-            return {
+            base = {
                 "ema_20": TA.calculate_ema(list(self.prices), 20),
                 "rsi_14": TA.calculate_rsi(list(self.prices), 14),
                 "atr_14": TA.calculate_atr(list(self.highs), list(self.lows), list(self.prices), 14)
             }
+            base.update(self._compute_advanced_features())
+            return base
         
         rsi = 50.0
         if self._avg_loss_14 > 0:
             rs = self._avg_gain_14 / self._avg_loss_14
             rsi = 100 - (100 / (1 + rs))
-            
-        return {
+        
+        result = {
             "ema_20": self._ema_20,
             "rsi_14": rsi,
             "atr_14": self._atr_14
         }
+        result.update(self._compute_advanced_features())
+        return result
+
+    def _compute_advanced_features(self) -> dict:
+        """FEAT-5: Features avanzadas para XGBoost."""
+        features = {
+            "bollinger_pos": 0.5,
+            "tick_rate": 0.0,
+            "atr_relative": 0.0,
+            "hour_sin": 0.0,
+            "hour_cos": 1.0
+        }
+        
+        # Bollinger Band Position (0=lower, 0.5=middle, 1=upper)
+        if len(self.prices) >= 20 and self._ema_20:
+            import math
+            prices_list = list(self.prices)
+            last_20 = prices_list[-20:]
+            std = (sum((p - self._ema_20) ** 2 for p in last_20) / 20) ** 0.5
+            if std > 0:
+                upper = self._ema_20 + (2 * std)
+                lower = self._ema_20 - (2 * std)
+                band_width = upper - lower
+                if band_width > 0:
+                    features["bollinger_pos"] = max(0.0, min(1.0, (prices_list[-1] - lower) / band_width))
+        
+        # Tick Rate (ticks per second en los últimos 60s)
+        if len(self.timestamps) >= 2:
+            now = self.timestamps[-1]
+            cutoff = now - 60.0
+            recent_ticks = sum(1 for t in self.timestamps if t >= cutoff)
+            features["tick_rate"] = recent_ticks / 60.0
+        
+        # ATR Relative
+        if self._atr_14 and len(self.prices) > 0 and self.prices[-1] > 0:
+            features["atr_relative"] = self._atr_14 / self.prices[-1]
+        
+        # Hour of day (cyclical encoding UTC)
+        if self.timestamps:
+            import math
+            from datetime import datetime, UTC
+            dt = datetime.fromtimestamp(self.timestamps[-1], tz=UTC)
+            hour_frac = dt.hour + dt.minute / 60.0
+            features["hour_sin"] = math.sin(2 * math.pi * hour_frac / 24)
+            features["hour_cos"] = math.cos(2 * math.pi * hour_frac / 24)
+        
+        return features

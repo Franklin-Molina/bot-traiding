@@ -5,14 +5,14 @@ from loguru import logger
 from sqlalchemy import select, update
 from infrastructure.database import async_session
 from models.trading import MLTrainingData
-from infrastructure.binance_rest import BinanceRest
+from infrastructure.binance_rest import get_binance_rest
 from core.state import system_state
 
 class OutcomeTracker:
     def __init__(self, interval_minutes: int = 15, timeout_minutes: int = 45):
         self.interval_minutes = interval_minutes
         self.timeout_minutes = timeout_minutes
-        self.binance = BinanceRest()
+        self.binance = get_binance_rest()  # ARQ-1: Singleton compartido
         self.is_running = False
         self._task = None
         

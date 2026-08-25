@@ -7,18 +7,31 @@ class SlotManager:
     @staticmethod
     async def get_available_slot():
         """
-        Busca el primer slot disponible en la base de datos.
+        Busca y RESERVA atómicamente el primer slot disponible (SELECT FOR UPDATE SKIP LOCKED).
+        Retorna el slot ya bloqueado, o None si no hay disponibles.
         """
         async with async_session() as session:
-            query = select(Slot).where(Slot.status == SlotStatus.AVAILABLE).limit(1)
+            # Atomic: seleccionar y bloquear en una sola transacción
+            query = (
+                select(Slot)
+                .where(Slot.status == SlotStatus.AVAILABLE)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
             result = await session.execute(query)
             slot = result.scalar_one_or_none()
+            
+            if slot:
+                slot.status = SlotStatus.IN_USE
+                await session.commit()
+                logger.info(f"Slot {slot.id} reservado atómicamente.")
+            
             return slot
 
     @staticmethod
     async def lock_slot(slot_id: int):
         """
-        Bloquea un slot para su uso.
+        Bloquea un slot para su uso (compatibilidad — ahora get_available_slot ya lo bloquea).
         """
         async with async_session() as session:
             stmt = (
@@ -28,7 +41,7 @@ class SlotManager:
             )
             await session.execute(stmt)
             await session.commit()
-            logger.info(f"Slot {slot_id} bloqueado exitosamente.")
+            logger.debug(f"Slot {slot_id} lock confirmado.")
 
     @staticmethod
     async def release_slot(slot_id: int):

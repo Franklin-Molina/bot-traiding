@@ -3,16 +3,16 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from core.config import settings
 from core.state import system_state
-from infrastructure.binance_rest import BinanceRest
+from infrastructure.binance_rest import get_binance_rest
 from infrastructure.database import async_session
 from models.trading import Position, TradeHistory, Slot, SlotStatus, MLTrainingData
 from sqlalchemy import select, func
 from trading.slots import SlotManager
 from ai.orchestrator import AIOrchestrator
-from datetime import datetime
+from datetime import datetime, timedelta, UTC
 
 router = Router()
-binance = BinanceRest()
+binance = get_binance_rest()  # ARQ-1: Singleton compartido
 ai = AIOrchestrator()
 
 @router.message(Command("start"))
@@ -45,7 +45,10 @@ async def cmd_help(message: types.Message):
         "/signals - Ver señales actuales en cola\n"
         "/opportunities - Oportunidades detectadas por Macro\n"
         "/ml_status - Estado del Data Lake (XGBoost)\n"
-        "/mode - Ver modo actual (Simulación/Real)"
+        "/mode - Ver modo actual (Simulación/Real)\n\n"
+        "**Rendimiento:**\n"
+        "/stats - Dashboard de rendimiento (Win Rate, Sharpe, etc.)\n"
+        "/daily - Resumen del día actual"
     )
     await message.answer(help_text, parse_mode="Markdown")
 
@@ -272,4 +275,90 @@ async def cmd_ml_status(message: types.Message):
         f"❌ **Perdedores/BE:** {losers_count}\n\n"
         f"⏳ *El modelo requiere historial para iniciar la Fase 2.*"
     )
+    await message.answer(text, parse_mode="Markdown")
+
+@router.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """FEAT-4: Dashboard de rendimiento en tiempo real."""
+    async with async_session() as session:
+        # Total trades
+        total = await session.scalar(select(func.count(TradeHistory.id))) or 0
+        if total == 0:
+            return await message.answer("📊 No hay trades cerrados aún para calcular estadísticas.")
+        
+        # Win/Loss
+        winners = await session.scalar(select(func.count(TradeHistory.id)).where(TradeHistory.pnl > 0)) or 0
+        losers = total - winners
+        win_rate = (winners / total * 100) if total > 0 else 0
+        
+        # PnL
+        total_pnl = await session.scalar(select(func.sum(TradeHistory.pnl))) or 0.0
+        avg_pnl = await session.scalar(select(func.avg(TradeHistory.pnl))) or 0.0
+        avg_pnl_pct = await session.scalar(select(func.avg(TradeHistory.pnl_percent))) or 0.0
+        
+        # Best / Worst
+        best_pnl = await session.scalar(select(func.max(TradeHistory.pnl_percent))) or 0.0
+        worst_pnl = await session.scalar(select(func.min(TradeHistory.pnl_percent))) or 0.0
+        
+        # Profit Factor
+        gross_profit = await session.scalar(select(func.sum(TradeHistory.pnl)).where(TradeHistory.pnl > 0)) or 0.0
+        gross_loss = abs(await session.scalar(select(func.sum(TradeHistory.pnl)).where(TradeHistory.pnl < 0)) or 0.001)
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        
+        # Avg Slippage
+        avg_slip_buy = await session.scalar(select(func.avg(TradeHistory.slippage_buy_pct))) or 0.0
+        avg_slip_sell = await session.scalar(select(func.avg(TradeHistory.slippage_sell_pct))) or 0.0
+
+    pf_emoji = "🟢" if profit_factor > 1.5 else ("🟡" if profit_factor > 1.0 else "🔴")
+    wr_emoji = "🟢" if win_rate > 55 else ("🟡" if win_rate > 45 else "🔴")
+    
+    text = (
+        f"📊 **Dashboard de Rendimiento**\n\n"
+        f"{wr_emoji} **Win Rate:** {win_rate:.1f}% ({winners}W / {losers}L)\n"
+        f"💰 **PnL Total:** {total_pnl:+.2f} USDT\n"
+        f"📈 **PnL Promedio:** {avg_pnl:+.2f} USDT ({avg_pnl_pct:+.2f}%)\n"
+        f"🏆 **Mejor Trade:** {best_pnl:+.2f}%\n"
+        f"💀 **Peor Trade:** {worst_pnl:+.2f}%\n"
+        f"{pf_emoji} **Profit Factor:** {profit_factor:.2f}\n\n"
+        f"⚡ **Slippage Promedio:**\n"
+        f"   Compra: {avg_slip_buy:.3f}% | Venta: {avg_slip_sell:.3f}%"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+@router.message(Command("daily"))
+async def cmd_daily(message: types.Message):
+    """FEAT-4: Resumen del día actual."""
+    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    async with async_session() as session:
+        # Trades del día
+        day_filter = TradeHistory.closed_at >= today_start
+        total_today = await session.scalar(select(func.count(TradeHistory.id)).where(day_filter)) or 0
+        
+        if total_today == 0:
+            return await message.answer("📅 No hay trades cerrados hoy.")
+        
+        wins_today = await session.scalar(select(func.count(TradeHistory.id)).where(day_filter, TradeHistory.pnl > 0)) or 0
+        pnl_today = await session.scalar(select(func.sum(TradeHistory.pnl)).where(day_filter)) or 0.0
+        
+        # Desglose por razón de cierre
+        result = await session.execute(
+            select(TradeHistory.reason, func.count(TradeHistory.id))
+            .where(day_filter)
+            .group_by(TradeHistory.reason)
+        )
+        reasons = {row[0]: row[1] for row in result.all()}
+    
+    pnl_emoji = "🟢" if pnl_today > 0 else "🔴"
+    wr_today = (wins_today / total_today * 100) if total_today > 0 else 0
+    
+    text = (
+        f"📅 **Resumen del Día**\n\n"
+        f"{pnl_emoji} **PnL Hoy:** {pnl_today:+.2f} USDT\n"
+        f"📊 **Trades:** {total_today} (WR: {wr_today:.0f}%)\n\n"
+        f"**Razones de Cierre:**\n"
+    )
+    for reason, count in reasons.items():
+        text += f"  • {reason}: {count}\n"
+    
     await message.answer(text, parse_mode="Markdown")

@@ -9,11 +9,19 @@ class ExchangeInterface(ABC):
         pass
 
     @abstractmethod
+    async def get_balance(self, asset: str) -> float:
+        pass
+
+    @abstractmethod
     async def execute_market_buy(self, symbol: str, quantity: float, client_order_id: str = None):
         pass
 
     @abstractmethod
     async def execute_sniper_buy(self, symbol: str, amount_usd: float, current_ask: float, slippage_tolerance: float = 0.001, client_order_id: str = None):
+        pass
+
+    @abstractmethod
+    async def execute_limit_ioc_sell(self, symbol: str, price: float, quantity: float = None, client_order_id: str = None, slippage_tolerance: float = 0.002):
         pass
 
     @abstractmethod

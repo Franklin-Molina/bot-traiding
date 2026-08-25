@@ -299,8 +299,9 @@ class ReconciliationEngine:
         highest_price=float(fill_price),
         last_sl_update_price=float(fill_price),
 
-        stop_loss=float(fill_price) * 0.98,
-        take_profit=float(fill_price) * 1.05,
+        # BUG-7 FIX: Alineado con estrategia momentum-riding del executor
+        stop_loss=float(fill_price) * 0.994,  # SL inicial 0.6% (mismo que executor min_sl_dist)
+        take_profit=None,  # Sin TP fijo — el trailing se encarga
 
         opened_at=datetime.now(UTC)
         )

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     BREAKEVEN_TRIGGER_PERCENT: float = 0.008  # 0.8% trigger para asegurar breakeven (Más rápido en mercado DEAD)
     BREAKEVEN_PROFIT_PERCENT: float = 0.005   # Asegurar al menos +0.5% cuando se activa breakeven
     
+    # Position Timeout
+    MAX_POSITION_HOLD_MINUTES: int = 120       # Cerrar posición estancada después de 2 horas
+    MIN_PNL_TO_HOLD: float = 0.003             # PnL mínimo (+0.3%) para mantener al timeout
 
     # Database
     DB_DSN: str = "postgresql://user:pass@localhost:5432/trading_db"

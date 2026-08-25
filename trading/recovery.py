@@ -1,7 +1,7 @@
 import asyncio
 import time
 from loguru import logger
-from infrastructure.binance_rest import BinanceRest
+from infrastructure.binance_rest import get_binance_rest
 from core.state import system_state, HealthStatus
 
 class RecoveryEngine:
@@ -9,7 +9,7 @@ class RecoveryEngine:
     Motor encargado de garantizar la continuidad de los datos y el estado de Warmup.
     """
     def __init__(self):
-        self.binance = BinanceRest()
+        self.binance = get_binance_rest()  # ARQ-1: Singleton compartido
         self._warmup_symbols = set()
         self.recovery_started = set()
 

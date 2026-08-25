@@ -44,36 +44,58 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
     Mantiene la lista de candidatos activos y monitorea sus ticks.
     """
     logger.info("Procesador de estrategias activo.")
-    from infrastructure.binance_rest import BinanceRest
+    from infrastructure.binance_rest import get_binance_rest
     executor = TradeExecutor(alert_queue)
     recovery = RecoveryEngine()
-    binance_rest = BinanceRest()
+    binance_rest = get_binance_rest()  # ARQ-1: Singleton compartido
     
     await executor.start()
     await executor.load_active_positions()
     
     async def check_macro_trend(sym: str, current_p: float) -> bool:
+        """EST-3: Validación multi-timeframe (15m + 1H)."""
         try:
-            klines = await binance_rest.get_klines(sym, '15m', limit=96)
-            if not klines or len(klines) < 50:
-                return True
-            closes = [float(k[4]) for k in klines]
-            closes[-1] = current_p # Update last unclosed candle
-            ema9 = TA.calculate_ema(closes, 9)
-            ema21 = TA.calculate_ema(closes, 21)
-            ema50 = TA.calculate_ema(closes, 50)
-            if ema9 is None or ema21 is None or ema50 is None:
-                return True
+            # --- Timeframe 15m ---
+            klines_15m = await binance_rest.get_klines(sym, '15m', limit=96)
+            tf15_bearish = False
+            if klines_15m and len(klines_15m) >= 50:
+                closes = [float(k[4]) for k in klines_15m]
+                closes[-1] = current_p
+                ema9 = TA.calculate_ema(closes, 9)
+                ema21 = TA.calculate_ema(closes, 21)
+                ema50 = TA.calculate_ema(closes, 50)
                 
-            cumulative_vp = sum(((float(k[2]) + float(k[3]) + float(k[4])) / 3) * float(k[5]) for k in klines)
-            cumulative_v = sum(float(k[5]) for k in klines)
-            vwap = cumulative_vp / cumulative_v if cumulative_v > 0 else 0
+                if ema9 and ema21 and ema50:
+                    cumulative_vp = sum(((float(k[2]) + float(k[3]) + float(k[4])) / 3) * float(k[5]) for k in klines_15m)
+                    cumulative_v = sum(float(k[5]) for k in klines_15m)
+                    vwap = cumulative_vp / cumulative_v if cumulative_v > 0 else 0
+                    
+                    if current_p < ema9 and current_p < ema21 and current_p < ema50:
+                        tf15_bearish = True
+                    if current_p < vwap * 0.998:
+                        tf15_bearish = True
+
+            # --- Timeframe 1H ---
+            klines_1h = await binance_rest.get_klines(sym, '1h', limit=50)
+            tf1h_bearish = False
+            if klines_1h and len(klines_1h) >= 20:
+                closes_1h = [float(k[4]) for k in klines_1h]
+                closes_1h[-1] = current_p
+                ema20_1h = TA.calculate_ema(closes_1h, 20)
+                ema50_1h = TA.calculate_ema(closes_1h, 50) if len(closes_1h) >= 50 else None
                 
-            # Rechazar SOLO si el precio está por debajo de las TRES medias O por debajo del VWAP fuertemente
-            if current_p < ema9 and current_p < ema21 and current_p < ema50:
+                if ema20_1h and current_p < ema20_1h * 0.995:
+                    tf1h_bearish = True
+                if ema50_1h and current_p < ema50_1h:
+                    tf1h_bearish = True
+
+            # Rechazar solo si AMBOS timeframes son bajistas
+            if tf15_bearish and tf1h_bearish:
+                logger.warning(f"🚫 Multi-TF Bearish: {sym} bajista en 15m Y 1H")
                 return False
-            if current_p < vwap * 0.998: # Por debajo del VWAP con un pequeño margen
-                return False
+            # Advertir si uno es bajista
+            if tf15_bearish or tf1h_bearish:
+                logger.info(f"⚠️ {sym} parcialmente bajista: 15m={'↓' if tf15_bearish else '↑'} | 1H={'↓' if tf1h_bearish else '↑'}")
             return True
         except Exception as e:
             logger.error(f"Error en macro trend check para {sym}: {e}")
@@ -270,6 +292,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                         if symbol in pending_entries:
                             entry_data = pending_entries[symbol]
                             
+                            # BUG-1 FIX: atr_rel ahora viene del pending_entry
                             atr_relative = entry_data.get("atr_rel", 0.002)
                             if atr_relative > 0.005:
                                 confirm_seconds = 5
@@ -303,7 +326,12 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                         active_candidates.pop(symbol, None)
                                     else:
                                         logger.success(f"✅ APROBADO XGBOOST: {symbol} | Prob Éxito: {prob_exito:.1%}")
-                                        await executor.try_buy(symbol, current_price, entry_data["score"], atr=indicators.get('atr_14'), timestamp=tick.get('E'), momentum=ml_features.get("momentum_15s", 0), ml_features=ml_features)
+                                        # BUG-2 FIX: Recalcular indicators dentro de confirmación
+                                        confirm_atr = None
+                                        if symbol in price_buffers:
+                                            confirm_indicators = price_buffers[symbol].get_indicators()
+                                            confirm_atr = confirm_indicators.get('atr_14')
+                                        await executor.try_buy(symbol, current_price, entry_data["score"], atr=confirm_atr, timestamp=tick.get('E'), momentum=ml_features.get("momentum_15s", 0), ml_features=ml_features)
                                         active_candidates.pop(symbol, None)
                                 else:
                                     logger.warning(f"🚫 COMPRA ABORTADA: {symbol} retrocedió >50% en los 10s de espera.")
@@ -324,6 +352,12 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             indicators = price_buffers[symbol].get_indicators()
                             if indicators['atr_14'] is None: continue
 
+                            # EST-1: Filtro RSI — rechazar si está en sobrecompra extrema
+                            rsi_14 = indicators.get('rsi_14')
+                            if rsi_14 is not None and rsi_14 > settings.MAX_RSI_ENTRY:
+                                logger.warning(f"🚫 RSI OVERBOUGHT: {symbol} RSI={rsi_14:.1f} > {settings.MAX_RSI_ENTRY}. Cooldown 60s.")
+                                last_analysis[symbol] = now_ts + 60
+                                continue
                             atr_rel = indicators['atr_14'] / current_price
                             entry_score = 0
                             momentum_ok = False
@@ -331,6 +365,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                             # 1. Micro-Momentum Real (Ventana Temporal 60s)
                             price_60s_ago = price_buffers[symbol].get_price_ago(60.0)
                             momentum = 0.0
+                            local_range = 0.0  # BUG-3 FIX: Inicializar antes del bloque condicional
                             if price_60s_ago:
                                 momentum = (current_price - price_60s_ago) / price_60s_ago
                                 local_range, _ = price_buffers[symbol].get_local_range(60.0)
@@ -390,7 +425,7 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     spread_ok = True
                                     current_price = book_tickers[symbol]['ask']
                                 else:
-                                    logger.warning(f"❌ SPREAD FAIL {symbol} | {spread_pct:.4%} > {max_spread:.4%} (ATR: {atr_rel:.4%})")
+                                    logger.debug(f"SPREAD FAIL {symbol} | {spread_pct:.4%} > {max_spread:.4%}")
 
                             # 4. ATR (Volatilidad Mínima)
                             if atr_rel >= settings.MIN_ATR_RELATIVE:
@@ -410,9 +445,9 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     last_logged_score.pop(symbol, None)
                                     continue
 
-                            # Logging Inteligente (Solo si cambia score significativamente)
+                            # ARQ-3: Logging Inteligente (Solo si cambia score significativamente)
                             if entry_score != last_logged_score.get(symbol):
-                                logger.info(f"TACTICAL | {symbol} | Score={entry_score} | Mom={momentum:.5f} | RangeOK={momentum_ok} | SpreadOK={spread_ok}")
+                                logger.debug(f"TACTICAL | {symbol} | Score={entry_score} | Mom={momentum:.5f} | RangeOK={momentum_ok} | SpreadOK={spread_ok}")
                                 last_logged_score[symbol] = entry_score
 
                             if entry_score >= 80 and momentum_ok and spread_ok:
@@ -432,15 +467,22 @@ async def strategy_processor(market_queue: asyncio.Queue, strategy_queue: asynci
                                     "spread": spread_pct,
                                     "momentum_15s": momentum,
                                     "local_range_15s": local_range,
-                                    "ai_raw": candidate.get("ai_raw", {})
+                                    # FEAT-5: Features avanzadas del PriceBuffer
+                                    "rsi_14": indicators.get("rsi_14", 50.0),
+                                    "bollinger_pos": indicators.get("bollinger_pos", 0.5),
+                                    "tick_rate": indicators.get("tick_rate", 0.0),
+                                    "atr_relative": indicators.get("atr_relative", 0.0),
+                                    "hour_sin": indicators.get("hour_sin", 0.0),
+                                    "hour_cos": indicators.get("hour_cos", 1.0),
                                 }
                                 
-                                # Enviar a cola de confirmación (10s)
+                                # Enviar a cola de confirmación
                                 pending_entries[symbol] = {
                                     "trigger_price": current_price,
                                     "base_price": price_60s_ago,
                                     "ts": now_ts,
                                     "score": entry_score,
+                                    "atr_rel": atr_rel,  # BUG-1 FIX: Guardar para confirmación adaptativa
                                     "ml": ml_features
                                 }
 

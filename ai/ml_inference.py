@@ -58,20 +58,20 @@ class HybridInferenceEngine:
                 "tech_score": ml_features.get("tech_score", 50),
                 "spread": ml_features.get("spread", 0.001),
                 "momentum_15s": ml_features.get("momentum_15s", 0.0),
-                "local_range_15s": ml_features.get("local_range_15s", 0.0)
+                "local_range_15s": ml_features.get("local_range_15s", 0.0),
+                # FEAT-5: Features avanzadas
+                "rsi_14": ml_features.get("rsi_14", 50.0),
+                "bollinger_pos": ml_features.get("bollinger_pos", 0.5),
+                "tick_rate": ml_features.get("tick_rate", 0.0),
+                "atr_relative": ml_features.get("atr_relative", 0.0),
+                "hour_sin": ml_features.get("hour_sin", 0.0),
+                "hour_cos": ml_features.get("hour_cos", 1.0),
             }
-
-            # Extraer IA Raw
-            ai_raw = ml_features.get("ai_raw", {})
-            data["ai_risk"] = ai_raw.get("risk", 0.0)
-            data["ai_manipulation"] = ai_raw.get("manipulation", 0.0)
-            data["ai_news"] = ai_raw.get("news_strength", 0.0)
-            data["ai_momentum"] = ai_raw.get("momentum", 0.0)
-            data["ai_confidence"] = ai_raw.get("confidence", 0.0)
 
             # Market Regime (One-Hot Encoding esperado por el modelo)
             regime = ml_features.get("market_regime", "NORMAL")
-            for r in ['BULL', 'BEAR', 'CRAB', 'DEAD']:
+            # EST-5 FIX: Alineado con los regímenes reales del MacroEngine
+            for r in ['HOT', 'WARM', 'DEAD']:
                 data[f"market_regime_{r}"] = 1 if regime == r else 0
 
             # 2. Construir DataFrame con el orden EXACTO de las features de entrenamiento

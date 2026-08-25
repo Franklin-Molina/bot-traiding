@@ -5,6 +5,15 @@ from loguru import logger
 from core.config import settings
 from infrastructure.exchange_interface import ExchangeInterface
 
+_binance_singleton = None
+
+def get_binance_rest():
+    """ARQ-1: Singleton factory para compartir rate limiter entre todos los módulos."""
+    global _binance_singleton
+    if _binance_singleton is None:
+        _binance_singleton = BinanceRest()
+    return _binance_singleton
+
 class BinanceRest(ExchangeInterface):
     def __init__(self, api_key: str = None, api_secret: str = None):
         self.client = Spot(

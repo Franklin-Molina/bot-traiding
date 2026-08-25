@@ -4,7 +4,7 @@ import math
 from loguru import logger
 from core.config import settings
 from core.state import system_state
-from infrastructure.binance_rest import BinanceRest
+from infrastructure.binance_rest import get_binance_rest
 import uuid
 from infrastructure.database import async_session
 from models.trading import MLTrainingData
@@ -13,7 +13,7 @@ class MacroEngine:
     def __init__(self, candidates_queue: asyncio.Queue, alert_queue: asyncio.Queue):
         self.candidates_queue = candidates_queue
         self.alert_queue = alert_queue
-        self.binance = BinanceRest()
+        self.binance = get_binance_rest()  # ARQ-1: Singleton compartido
         self.cooldowns = {} # symbol: {"exp": timestamp, "reason": str}
 
     def _clean_cooldowns(self):
@@ -120,11 +120,16 @@ class MacroEngine:
                                 self.cooldowns[symbol] = {"exp": now + (settings.COOLDOWN_SPREAD_MINUTES * 60), "reason": "Spread Alto"}
                                 continue
                                 
-                            # Calcular Technical Score No Lineal
+                            # EST-2: Scoring Macro Mejorado
                             # Volumen base logarítmico (da menos peso a incrementos absurdos)
                             vol_score = min(max((math.log10(max(volume, 1)) - 7) / 1.5 * 40, 0), 40)
-                            # Rate of Change exponencial (premia cambios explosivos)
-                            chg_score = min(max(((change - 1.0) ** 1.2) / (19.0 ** 1.2) * 60, 0), 60)
+                            
+                            # Rate of Change con penalización para pumps extremos
+                            if change > 10.0:
+                                # Penalizar pump & dump potencial: invertir puntuación
+                                chg_score = max(60 - ((change - 10.0) * 5), 10)
+                            else:
+                                chg_score = min(max(((change - 1.0) ** 1.2) / (9.0 ** 1.2) * 60, 0), 60)
                             
                             tech_score = int(vol_score + chg_score)
                             

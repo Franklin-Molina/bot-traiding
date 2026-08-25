@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import Message
 from loguru import logger

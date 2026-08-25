@@ -589,6 +589,20 @@ class TradeExecutor:
                 exit_reason = "STOP_LOSS"
 
         # ============================
+        # EST-6: TIMEOUT DE POSICIONES ESTANCADAS
+        # ============================
+        if exit_reason is None:
+            minutes_in_trade = seconds_in_trade / 60
+            pnl_ratio = (current_price / pos.buy_price) - 1
+            if minutes_in_trade >= settings.MAX_POSITION_HOLD_MINUTES:
+                if pnl_ratio < settings.MIN_PNL_TO_HOLD:
+                    exit_reason = "TIMEOUT_STALE"
+                    logger.warning(
+                        f"⏰ TIMEOUT: {symbol} lleva {minutes_in_trade:.0f}min "
+                        f"con PnL {pnl_ratio:.2%} < {settings.MIN_PNL_TO_HOLD:.2%}. Cerrando."
+                    )
+
+        # ============================
         # EJECUCIÓN DE SALIDA
         # ============================
 

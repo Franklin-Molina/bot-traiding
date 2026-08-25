@@ -32,11 +32,7 @@ async def extract_data():
                 "spread": r.spread,
                 "momentum_15s": r.momentum_15s,
                 "local_range_15s": r.local_range_15s,
-                "ai_risk": r.ai_risk or 0,
-                "ai_manipulation": r.ai_manipulation or 0,
-                "ai_news": r.ai_news or 0,
-                "ai_momentum": r.ai_momentum or 0,
-                "ai_confidence": r.ai_confidence or 0,
+                # EST-4: Removidas features de IA (siempre 0.0 sin orquestador activo)
                 "target_class": r.target_class
             })
             
@@ -47,8 +43,8 @@ def preprocess_features(df):
     # Market Regime a One-Hot
     df = pd.get_dummies(df, columns=["market_regime"])
     
-    # Asegurar que todas las columnas posibles existan (para cuando falten regímenes)
-    for reg in ['market_regime_BULL', 'market_regime_BEAR', 'market_regime_CRAB', 'market_regime_DEAD']:
+    # EST-5 FIX: Asegurar que las columnas de régimen real existan
+    for reg in ['market_regime_HOT', 'market_regime_WARM', 'market_regime_DEAD']:
         if reg not in df.columns:
             df[reg] = 0
             

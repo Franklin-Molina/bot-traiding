@@ -11,6 +11,11 @@ class PaperExchange(ExchangeInterface):
     def __init__(self):
         self.last_order_id = 1000
         self.orders = {} # Almacén de órdenes simuladas
+        self.balances = {"USDT": 1000.0}  # BUG-6 FIX: Tracking de balances simulados
+
+    async def get_balance(self, asset: str = "USDT") -> float:
+        """Retorna el balance simulado de un asset."""
+        return self.balances.get(asset, 0.0)
 
     async def get_symbol_info(self, symbol: str):
         # Mock de info básica
